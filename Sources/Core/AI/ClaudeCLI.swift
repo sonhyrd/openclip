@@ -98,18 +98,19 @@ extension ClaudeCLI {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
             result = try container.decodeIfPresent(String.self, forKey: .result) ?? ""
-            modelUsage = try container.decodeIfPresent([String: ModelUsage].self, forKey: .modelUsage)
-            // `try?`, not `try`: a reshaped usage block is a telemetry loss, never a reason to
-            // refuse the transformed text sitting in `result`.
+            // `try?`, not `try`, for the SAME reason `usage` below uses it: this was the one strict
+            // decode left in a deliberately lenient envelope. A `modelUsage` that arrives as
+            // anything but a map of objects (null values, a numeric map, an array) would throw,
+            // `parseEnvelope` would return nil, and a successful transform whose corrected text is
+            // sitting right there in `result` would be discarded as `.malformedResponse` — the
+            // exact trade this type is built to refuse. Ratified: a moved telemetry field is
+            // logged, never fatal.
+            modelUsage = try? container.decodeIfPresent([String: ModelUsage].self, forKey: .modelUsage)
+            // A reshaped usage block is a telemetry loss, never a reason to refuse the transformed
+            // text sitting in `result`.
             thinkingTokens = (try? container.decode(Usage.self, forKey: .usage))?.outputTokensDetails?.thinkingTokens
         }
 
-        public init(isError: Bool, result: String, modelUsage: [String: ModelUsage]? = nil, thinkingTokens: Int? = nil) {
-            self.isError = isError
-            self.result = result
-            self.modelUsage = modelUsage
-            self.thinkingTokens = thinkingTokens
-        }
     }
 
     /// One entry of the envelope's model-usage map. Deliberately empty: only the *presence of the
@@ -151,6 +152,18 @@ extension ClaudeCLI {
         /// signal that would ever reveal the pin no longer resolving to what was requested, which
         /// is exactly what the dated pin exists to keep visible.
         case unexpected(reportedModels: [String])
+
+        /// The model identifier to name in the caller's log line. Lives here, beside `warning`,
+        /// because it is rendered from this enum's own payload — the app target was reaching in and
+        /// re-deriving it from the associated values.
+        public var loggedModel: String {
+            switch self {
+            case .matched:
+                return ClaudeCLI.model
+            case .unexpected(let models):
+                return models.isEmpty ? "unreported" : models.joined(separator: ", ")
+            }
+        }
 
         /// A log line for the app target, or nil when there is nothing to report. Not localized:
         /// it is addressed to a developer reading the log, not to the user.
@@ -228,14 +241,12 @@ extension ClaudeCLI {
             case .timedOut(let seconds):
                 return String(localized: "Claude Code did not respond within \(seconds) seconds. Try again, or try a shorter selection.")
             case .exited(let status, let stderr):
-                let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                if detail.isEmpty {
+                guard let detail = Self.presentableDetail(stderr) else {
                     return String(localized: "Claude Code exited with code \(Int(status)). Run `claude doctor` in Terminal to check your installation.")
                 }
                 return String(localized: "Claude Code exited with code \(Int(status)): \(detail)")
             case .rejectedInvocation(let detail):
-                let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty {
+                guard let trimmed = Self.presentableDetail(detail) else {
                     return String(localized: "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again.")
                 }
                 return String(localized: "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again. Details: \(trimmed)")
@@ -244,14 +255,21 @@ extension ClaudeCLI {
             case .malformedResponse:
                 return String(localized: "Claude Code returned a response OpenClip could not read. Run `claude update` in Terminal, then try again.")
             case .reportedError(let detail):
-                let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty {
+                guard let trimmed = Self.presentableDetail(detail) else {
                     return String(localized: "Claude Code reported an error. Run `claude update` in Terminal, then try again.")
                 }
                 return String(localized: "Claude Code reported an error: \(trimmed)")
             case .emptyOutput:
                 return String(localized: "Claude Code returned an empty response. Try again, or try a shorter selection.")
             }
+        }
+
+        /// The trimmed detail, or nil when there is nothing worth showing the user. Three cases
+        /// carried the same trim-and-test; only that is shared — each still picks its own copy for
+        /// the with-detail and without-detail outcomes, because the advice differs.
+        private static func presentableDetail(_ detail: String) -> String? {
+            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
         }
 
         public var errorDescription: String? { message }
@@ -314,6 +332,31 @@ extension ClaudeCLI {
         expandedSearchDirectories(home: home).map { $0 + "/" + binaryName }
     }
 
+    /// Variables removed from the child, all for one reason: each can redirect or re-bill an
+    /// invocation this provider promises runs on *the user's own Claude subscription*, against
+    /// Anthropic, on the pinned model. `--setting-sources ""` closes the settings-file door; this
+    /// list closes the environment door beside it, which would otherwise be wide open.
+    ///
+    /// - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` — shadow the subscription login and bill an
+    ///   organisation instead. The headline invariant of this feature.
+    /// - `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` — route the run to AWS or GCP billing,
+    ///   which is neither the subscription nor an Anthropic endpoint.
+    /// - `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` — send the user's selected text to an
+    ///   arbitrary endpoint. On a utility that acts on whatever is selected, that is the whole
+    ///   blast-radius argument ADR 0001 makes about tools and MCP servers, applied to the wire.
+    /// - `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` — compete with the dated `--model` pin.
+    ///   The flag should win for the main call; the small fast model has no flag pinning it at all.
+    public static let strippedEnvironmentKeys = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    ]
+
     /// The **complete** environment for the child: `ShellProcessRunner` assigns it verbatim rather
     /// than inheriting, so anything omitted here is simply absent from the child.
     ///
@@ -327,10 +370,11 @@ extension ClaudeCLI {
         home: String = NSHomeDirectory()
     ) -> [String: String] {
         var environment = inherited
-        // An API key present on the machine would shadow the subscription login and quietly bill an
-        // organisation instead. This provider is subscription-only, by construction.
-        environment.removeValue(forKey: "ANTHROPIC_API_KEY")
-        environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
+        // Subscription-only, against Anthropic, on the pinned model — by construction rather than
+        // by hoping the machine carries none of these. See `strippedEnvironmentKeys`.
+        for key in strippedEnvironmentKeys {
+            environment.removeValue(forKey: key)
+        }
         environment["MAX_THINKING_TOKENS"] = "0"
         // A GUI app launched from Finder inherits a minimal PATH. Prefix the binary's own directory
         // and the known install directories, keeping whatever we did inherit as the tail.
@@ -394,7 +438,22 @@ extension ClaudeCLI {
         if let envelope = parseEnvelope(stdout: stdout) {
             if envelope.isError {
                 let detail = envelope.result.trimmingCharacters(in: .whitespacesAndNewlines)
-                return .failure(.reportedError(detail.isEmpty ? stderr : detail))
+                let reported = detail.isEmpty ? stderr : detail
+                // The patterns are matched HERE too, not only on the no-envelope branch. A rejected
+                // invocation was measured exiting 1 *with* a complete envelope, and a logged-out run
+                // is the same shape — so consulting the patterns only when parsing fails leaves
+                // `.rejectedInvocation` ("run `claude update`") and `.notAuthenticated`
+                // ("run `claude login`") unreachable on the one path they were written for, and the
+                // user is told to update a CLI that is fine while nobody has logged in.
+                //
+                // Matched against the ENVELOPE'S OWN text, never stderr: the measured bad-model run
+                // prints `unrecognized_model` on stderr *and* a better explanation ("API Error: 404
+                // model: …") in the envelope, and reading stderr here would throw that explanation
+                // away for a generic "run `claude update`". Each branch reads the channel it is on.
+                if let specific = patternFailure(in: reported) {
+                    return .failure(specific)
+                }
+                return .failure(.reportedError(reported))
             }
             let text = envelope.result.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return .failure(.emptyOutput) }
@@ -406,19 +465,29 @@ extension ClaudeCLI {
             ))
         }
 
-        let haystack = stderr.lowercased()
-        if rejectedInvocationPatterns.contains(where: haystack.contains) {
-            return .failure(.rejectedInvocation(stderr))
-        }
-        if notAuthenticatedPatterns.contains(where: haystack.contains) {
-            return .failure(.notAuthenticated)
+        if let specific = patternFailure(in: stderr) {
+            return .failure(specific)
         }
         if exitStatus != 0 {
             return .failure(.exited(status: exitStatus, stderr: stderr))
         }
-        guard stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .failure(.malformedResponse)
+        return .failure(stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? .emptyOutput
+            : .malformedResponse)
+    }
+
+    /// The rejection and not-logged-in patterns matched against one piece of CLI text — an
+    /// envelope's `result` where the CLI emits one, stderr where it does not. Returns nil when
+    /// nothing matches, so the caller falls through to its own less specific answer with the raw
+    /// text still intact.
+    private static func patternFailure(in text: String) -> Failure? {
+        let haystack = text.lowercased()
+        if rejectedInvocationPatterns.contains(where: haystack.contains) {
+            return .rejectedInvocation(text)
         }
-        return .failure(.emptyOutput)
+        if notAuthenticatedPatterns.contains(where: haystack.contains) {
+            return .notAuthenticated
+        }
+        return nil
     }
 }

@@ -121,6 +121,32 @@ extension ClaudeCLITests {
         XCTAssertTrue(outcome?.message.contains("claude login") == true)
     }
 
+    /// The CLI's documented failure path is an `is_error: true` envelope, NOT a parse failure — so
+    /// the patterns are matched against the envelope's own `result` too. Consulting them only when
+    /// stdout fails to parse made `.notAuthenticated` unreachable on the one path it was written
+    /// for, and told a logged-out user to run `claude update`.
+    func testNotAuthenticatedIsFoundInsideAnErrorEnvelope() {
+        let stdout = #"{"is_error":true,"result":"Invalid API key · Please run /login"}"#
+        let outcome = failure(ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 1))
+        XCTAssertEqual(outcome, .notAuthenticated)
+        XCTAssertTrue(outcome?.message.contains("claude login") == true)
+    }
+
+    func testRejectedInvocationIsFoundInsideAnErrorEnvelope() {
+        let stdout = #"{"is_error":true,"result":"unrecognized_model: claude-nope","subtype":"success"}"#
+        let outcome = failure(ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 1))
+        XCTAssertEqual(outcome, .rejectedInvocation("unrecognized_model: claude-nope"))
+        XCTAssertTrue(outcome?.message.contains("claude update") == true)
+    }
+
+    /// An error envelope carrying nothing a pattern recognises still lands on `.reportedError`
+    /// with its text intact — the fallback did not move.
+    func testUnrecognisedErrorEnvelopeStillReportsItsOwnText() {
+        let stdout = #"{"is_error":true,"result":"some novel failure nobody has a pattern for"}"#
+        let outcome = failure(ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 1))
+        XCTAssertEqual(outcome, .reportedError("some novel failure nobody has a pattern for"))
+    }
+
     /// Anything unmatched falls through to the generic case **with the raw stderr still visible**,
     /// so a novel failure is still actionable rather than opaque.
     func testUnrecognisedNonZeroExitFallsThroughWithStderrVisible() {
@@ -230,6 +256,38 @@ extension ClaudeCLITests {
 // MARK: - Binary resolution (pure parts)
 
 extension ClaudeCLITests {
+    /// Ratified: a missing or unexpected `modelUsage` entry is logged, never fatal. That promise
+    /// was one strict `try` away from being false — a `modelUsage` of a shape the decoder refuses
+    /// used to throw out of `init(from:)`, take `parseEnvelope` to nil, and discard a perfectly
+    /// good transform as `.malformedResponse`.
+    func testAModelUsageOfTheWrongShapeStillReturnsTheTransformedText() {
+        let stdout = #"{"is_error":false,"result":"Corrected.","modelUsage":["not","a","map"]}"#
+        guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
+            return XCTFail("A reshaped telemetry field must never withhold the transformed text")
+        }
+        XCTAssertEqual(success.text, "Corrected.")
+        XCTAssertEqual(success.modelUsage, .unexpected(reportedModels: []))
+    }
+
+    /// The empty `ModelUsage` struct decodes no fields, so it absorbs whatever the value turns
+    /// into — a number here — and presence-by-key still resolves. This is the mechanism that makes
+    /// the ratified guarantee structural rather than a promise in a comment.
+    func testANumericModelUsageValueStillMatchesByKey() {
+        let stdout = #"{"is_error":false,"result":"Corrected.","modelUsage":{"claude-sonnet-4-5-20250929":123}}"#
+        guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
+            return XCTFail("Expected a success")
+        }
+        XCTAssertEqual(success.modelUsage, .matched(ClaudeCLI.ModelUsage()))
+    }
+
+    func testLoggedModelRendersFromTheOutcomesOwnPayload() {
+        XCTAssertEqual(ClaudeCLI.ModelUsageOutcome.matched(ClaudeCLI.ModelUsage()).loggedModel, ClaudeCLI.model)
+        XCTAssertEqual(ClaudeCLI.ModelUsageOutcome.unexpected(reportedModels: []).loggedModel, "unreported")
+        XCTAssertEqual(ClaudeCLI.ModelUsageOutcome.unexpected(reportedModels: ["a", "b"]).loggedModel, "a, b")
+    }
+}
+
+extension ClaudeCLITests {
     func testDiskCandidatesExpandTildeAndAppendTheBinaryName() {
         let candidates = ClaudeCLI.diskCandidatePaths(home: "/Users/tester")
         XCTAssertEqual(candidates.first, "/Users/tester/.claude/local/claude")
@@ -298,6 +356,50 @@ extension ClaudeCLITests {
         )
         XCTAssertNil(environment["ANTHROPIC_API_KEY"])
         XCTAssertNil(environment["ANTHROPIC_AUTH_TOKEN"])
+    }
+
+    /// Stripping the two credentials while letting the rest of the environment through leaves the
+    /// door open on every invariant the credential strip exists to protect: Bedrock/Vertex re-bill
+    /// the run away from the subscription, a base URL sends the user's selected text somewhere else
+    /// entirely, and the model variables compete with the dated pin. Every key in the list goes,
+    /// and this test is what stops one being dropped from it quietly.
+    func testEveryRedirectingOrRebillingVariableIsRemoved() {
+        let hostile = [
+            "ANTHROPIC_API_KEY": "sk-ant-whatever",
+            "ANTHROPIC_AUTH_TOKEN": "token",
+            "ANTHROPIC_BASE_URL": "https://not-anthropic.example.com",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Exfil: yes",
+            "ANTHROPIC_MODEL": "claude-something-else",
+            "ANTHROPIC_SMALL_FAST_MODEL": "claude-something-cheaper",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "PATH": "/usr/bin",
+            "HOME": Self.home,
+        ]
+        let environment = ClaudeCLI.childEnvironment(
+            inherited: hostile,
+            binaryPath: Self.binary,
+            home: Self.home
+        )
+        // The list is asserted as a LITERAL, not iterated. Looping over
+        // `ClaudeCLI.strippedEnvironmentKeys` would delete its own assertion along with any key
+        // someone removed from it — a test that goes green by shrinking is the exact failure the
+        // flag-list guard exists to prevent, and it belongs here for the same reason.
+        XCTAssertEqual(ClaudeCLI.strippedEnvironmentKeys, [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+        ])
+        for key in hostile.keys where key != "PATH" && key != "HOME" {
+            XCTAssertNil(environment[key], "\(key) must never reach the child")
+        }
+        // Everything else is still inherited: this is a strip list, not an allow list.
+        XCTAssertEqual(environment["HOME"], Self.home)
     }
 
     func testThinkingTokensAreDisabled() {

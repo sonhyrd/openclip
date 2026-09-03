@@ -84,6 +84,10 @@ Each subsystem owns a dedicated `LogChannel` property on `Log` under the `com.op
   default-private. Only ids and URLs are marked `privacy: .public` (e.g.
   `\(action.id, privacy: .public)`). Do not mark user text `.public`. JS script `console.log` arguments
   are redacted into structural metadata (`<string len=N>`, `<Object keys=[...]>`) before logging.
+  One named exception: the resolved `claude` binary path in `AIServiceManager` is `.public`. A
+  binary that will not resolve is this provider's number-one failure mode, a redacted path
+  defeats the whole diagnostic, and the same path is already shown to the user in
+  Preferences → AI. It is an exception on the record, not a precedent for paths generally.
 - **No hot-path logging:** never log in per-mouse-move hover updates or high-frequency view bodies.
 
 ## Viewing & Filtering Workflows

@@ -17,7 +17,8 @@ OpenClip Workspace
 │ ├── Action-search matcher & popup mode (ActionSearch)
 │ ├── Strongly-typed settings engine (SettingsStore, SettingKey)
 │ ├── Application policy rules (AppRule, RuleEngine)
-│ └── Pure snippet & manifest parsing (OpenClipSnippetParser, ExtensionManifest)
+│ ├── Pure snippet & manifest parsing (OpenClipSnippetParser, ExtensionManifest)
+│ └── Pure AI-provider domain (ClaudeCLI: argument list, envelope, failure taxonomy)
 │
 └── OpenClip (macOS Application Target)
  ├── AppKit floating panels & SwiftUI UI (PopupPanel, PopupView, PreferencesView)

@@ -105,13 +105,7 @@ public final class ClaudeCLIProvider: AIProvider {
     /// Model, exit status and thinking tokens are `.public` so they are readable in the log; the
     /// selection and the transformed text are never logged at all.
     private static func logSuccess(_ success: ClaudeCLI.Success, exitStatus: Int32) {
-        let model: String
-        switch success.modelUsage {
-        case .matched:
-            model = ClaudeCLI.model
-        case .unexpected(let reported):
-            model = reported.isEmpty ? "unreported" : reported.joined(separator: ", ")
-        }
+        let model = success.modelUsage.loggedModel
         let thinkingTokens = success.thinkingTokens.map(String.init) ?? "unreported"
         Log.ai.info("""
             Claude CLI transform succeeded (exit \(exitStatus, privacy: .public), \

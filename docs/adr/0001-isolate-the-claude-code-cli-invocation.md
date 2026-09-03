@@ -193,6 +193,15 @@ cannot be built on that ambiguity.
   by modification time.** A transcript that misses its own purge is older than every subsequent
   cutoff, and so survives forever.
 
+- **Handing the provider a resolved path string.** The spec asks for this literally, and it is not
+  constructible: `AIServiceManager.currentProvider` is a **synchronous** computed property that
+  rebuilds the provider on every access, while resolution is `async throws`. A `String` snapshot
+  would be empty until something else had resolved it, so the first transform after launch would
+  fail with a "not found" the user could only clear by opening Preferences. The provider therefore
+  takes a `@MainActor () async throws -> String` closure over the manager's cache, which preserves
+  the actual constraint the spec was reaching for: **one login-shell spawn per app launch, never one
+  per transform.** Recorded here so the next reader does not "restore" the spec's literal wording.
+
 ## 8. One shot, not streaming — the spinner
 
 The provider's stream yields the finished text exactly **once** and finishes. `--output-format json`
