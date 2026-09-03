@@ -243,7 +243,8 @@ enum ShellResultMapper {
 
 /// Runs a subprocess to completion (or to the watchdog timeout) and returns its captured output.
 /// Throws on non-zero exit (stderr text as the message) and on timeout — the unified stricter
-/// error policy both shell runtimes adopt.
+/// error policy both shell runtimes adopt. `runCapturingExit` is the same execution — one watchdog,
+/// one process-group kill, one pair of pipe accumulators — reporting the exit status as a value.
 public enum ShellProcessRunner {
     public struct Invocation: Sendable {
         public var executableURL: URL
@@ -276,7 +277,10 @@ public enum ShellProcessRunner {
         public let terminationStatus: Int32
     }
 
-    public static func run(_ invocation: Invocation) async throws -> Output {
+    /// Runs the subprocess and returns its output for **any** exit status. Throws only when the
+    /// process fails to launch and when the watchdog timeout fires — so a caller that needs the
+    /// exit status and stderr as values (rather than flattened into one error) can have them.
+    public static func runCapturingExit(_ invocation: Invocation) async throws -> Output {
         try await Task.detached {
             let process = Process()
             process.executableURL = invocation.executableURL
@@ -360,21 +364,26 @@ public enum ShellProcessRunner {
             let outData = outReader.data
             let errData = errReader.data
 
-            if process.terminationStatus != 0 {
-                let errText = String(data: errData, encoding: .utf8) ?? ""
-                let errMsg = errText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "Script exited with code \(process.terminationStatus)"
-                    : errText
-                throw NSError(domain: Constants.actionErrorDomain,
-                              code: Int(process.terminationStatus),
-                              userInfo: [NSLocalizedDescriptionKey: errMsg])
-            }
-
             return Output(
                 stdout: String(data: outData, encoding: .utf8) ?? "",
                 stderr: String(data: errData, encoding: .utf8) ?? "",
                 terminationStatus: process.terminationStatus
             )
         }.value
+    }
+
+    public static func run(_ invocation: Invocation) async throws -> Output {
+        let output = try await runCapturingExit(invocation)
+
+        if output.terminationStatus != 0 {
+            let errMsg = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Script exited with code \(output.terminationStatus)"
+                : output.stderr
+            throw NSError(domain: Constants.actionErrorDomain,
+                          code: Int(output.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: errMsg])
+        }
+
+        return output
     }
 }
