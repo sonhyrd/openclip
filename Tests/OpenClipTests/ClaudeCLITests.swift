@@ -155,9 +155,8 @@ extension ClaudeCLITests {
 
 extension ClaudeCLITests {
     func testModelUsageIsReadByKeyWhenPresent() {
-        let usage = [Self.pinned: ClaudeCLI.ModelUsage(inputTokens: 4, outputTokens: 30)]
-        let outcome = ClaudeCLI.modelUsageOutcome(usage)
-        XCTAssertEqual(outcome, .matched(ClaudeCLI.ModelUsage(inputTokens: 4, outputTokens: 30)))
+        let outcome = ClaudeCLI.modelUsageOutcome([Self.pinned: ClaudeCLI.ModelUsage()])
+        XCTAssertEqual(outcome, .matched(ClaudeCLI.ModelUsage()))
         XCTAssertNil(outcome.warning)
     }
 
@@ -166,13 +165,12 @@ extension ClaudeCLITests {
     /// by key always finds the pin.
     func testTwoEntryMapStillResolvesThePinnedModelByKey() {
         let usage = [
-            "claude-haiku-4-5-20251001": ClaudeCLI.ModelUsage(inputTokens: 1, outputTokens: 2),
-            Self.pinned: ClaudeCLI.ModelUsage(inputTokens: 4, outputTokens: 30),
+            "claude-haiku-4-5-20251001": ClaudeCLI.ModelUsage(),
+            Self.pinned: ClaudeCLI.ModelUsage(),
         ]
-        XCTAssertEqual(
-            ClaudeCLI.modelUsageOutcome(usage),
-            .matched(ClaudeCLI.ModelUsage(inputTokens: 4, outputTokens: 30))
-        )
+        guard case .matched = ClaudeCLI.modelUsageOutcome(usage) else {
+            return XCTFail("Reading by key must find the pin regardless of dictionary order")
+        }
     }
 
     func testAbsentModelUsageReportsWhatWasThereInsteadOfFailing() {
@@ -276,5 +274,63 @@ extension ClaudeCLITests {
     fileprivate func failure(_ result: Result<ClaudeCLI.Success, ClaudeCLI.Failure>) -> ClaudeCLI.Failure? {
         guard case .failure(let failure) = result else { return nil }
         return failure
+    }
+}
+
+
+// MARK: - Child-environment shaping
+
+extension ClaudeCLITests {
+    private static let home = "/Users/someone"
+    private static let binary = "/Users/someone/.claude/local/claude"
+
+    /// User story 4: an API key on the machine would shadow the subscription login and quietly bill
+    /// an organisation. Both credential variables go, even when the inherited environment has them.
+    func testBothCredentialVariablesAreRemovedEvenWhenInherited() {
+        let environment = ClaudeCLI.childEnvironment(
+            inherited: [
+                "ANTHROPIC_API_KEY": "sk-ant-whatever",
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "PATH": "/usr/bin",
+            ],
+            binaryPath: Self.binary,
+            home: Self.home
+        )
+        XCTAssertNil(environment["ANTHROPIC_API_KEY"])
+        XCTAssertNil(environment["ANTHROPIC_AUTH_TOKEN"])
+    }
+
+    func testThinkingTokensAreDisabled() {
+        let environment = ClaudeCLI.childEnvironment(inherited: [:], binaryPath: Self.binary, home: Self.home)
+        XCTAssertEqual(environment["MAX_THINKING_TOKENS"], "0")
+    }
+
+    /// A GUI app launched from Finder inherits a minimal PATH, so the search directories are
+    /// prefixed — with the binary's own directory first (a version-managed install keeps its node
+    /// runtime beside it) and whatever we did inherit preserved as the tail.
+    func testSearchDirectoriesArePrefixedOntoPATHWithTheInheritedTailPreserved() {
+        let environment = ClaudeCLI.childEnvironment(
+            inherited: ["PATH": "/usr/bin:/bin"],
+            binaryPath: Self.binary,
+            home: Self.home
+        )
+        let entries = (environment["PATH"] ?? "").components(separatedBy: ":")
+        XCTAssertEqual(entries.first, "/Users/someone/.claude/local", "The binary's own directory goes first")
+        XCTAssertEqual(
+            entries,
+            ["/Users/someone/.claude/local"]
+                + ClaudeCLI.expandedSearchDirectories(home: Self.home)
+                + ["/usr/bin", "/bin"]
+        )
+    }
+
+    /// One expansion, used by both the disk candidates and the child PATH — two would be free to
+    /// disagree (`NSHomeDirectory()` vs `$HOME`).
+    func testTildeExpansionIsSharedWithTheDiskCandidates() {
+        XCTAssertEqual(
+            ClaudeCLI.diskCandidatePaths(home: Self.home),
+            ClaudeCLI.expandedSearchDirectories(home: Self.home).map { $0 + "/" + ClaudeCLI.binaryName }
+        )
+        XCTAssertFalse(ClaudeCLI.expandedSearchDirectories(home: Self.home).contains { $0.contains("~") })
     }
 }

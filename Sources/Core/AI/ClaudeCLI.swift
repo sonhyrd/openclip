@@ -112,16 +112,12 @@ extension ClaudeCLI {
         }
     }
 
-    /// One entry of the envelope's model-usage map. Every field is optional: a telemetry field that
-    /// moves or disappears must never turn a successful transform into a decoding failure.
+    /// One entry of the envelope's model-usage map. Deliberately empty: only the *presence of the
+    /// pinned model as a key* is read (see `modelUsageOutcome`), and decoding no fields is what
+    /// guarantees a telemetry field that moves or disappears can never turn a successful transform
+    /// into a decoding failure.
     public struct ModelUsage: Decodable, Sendable, Equatable {
-        public let inputTokens: Int?
-        public let outputTokens: Int?
-
-        public init(inputTokens: Int? = nil, outputTokens: Int? = nil) {
-            self.inputTokens = inputTokens
-            self.outputTokens = outputTokens
-        }
+        public init() {}
     }
 
     /// Locates the outermost `{…}` in `stdout` and decodes it, so a banner, a warning line or any
@@ -295,13 +291,55 @@ extension ClaudeCLI {
         return fileManager.isExecutableFile(atPath: path)
     }
 
-    /// The candidate paths to test, in order — `searchDirectories` with `~` expanded and the binary
-    /// name appended. Pure: touches no filesystem, so it is directly assertable in a test.
+    /// Resolution gets its **own** 10-second budget, separate from the 30-second invocation budget:
+    /// a zsh *login* shell sources the user's entire profile, so a version manager that phones home,
+    /// a hung completion initialiser, or an interactive `read` in a profile script can block
+    /// indefinitely. Bounding it here keeps a pathological profile from wedging the first transform.
+    ///
+    /// It lives beside the code that explains why it exists, not in `Constants`: it bounds one
+    /// CLI-specific call, not an app-wide policy. The literal is this file's own, so the
+    /// Foundation-only rule is untouched.
+    public static let discoveryTimeout: TimeInterval = 10
+
+    /// `searchDirectories` with `~` expanded against `home`. **The** tilde expansion — both the
+    /// disk candidates and the child `PATH` go through it. `NSString.expandingTildeInPath` reads
+    /// `$HOME` while `NSHomeDirectory()` does not, so two expansions can disagree; there is one.
+    public static func expandedSearchDirectories(home: String = NSHomeDirectory()) -> [String] {
+        searchDirectories.map { $0.hasPrefix("~/") ? home + String($0.dropFirst(1)) : $0 }
+    }
+
+    /// The candidate paths to test, in order — `expandedSearchDirectories` with the binary name
+    /// appended. Pure: touches no filesystem, so it is directly assertable in a test.
     public static func diskCandidatePaths(home: String = NSHomeDirectory()) -> [String] {
-        searchDirectories.map { directory in
-            let expanded = directory.hasPrefix("~/") ? home + String(directory.dropFirst(1)) : directory
-            return expanded + "/" + binaryName
-        }
+        expandedSearchDirectories(home: home).map { $0 + "/" + binaryName }
+    }
+
+    /// The **complete** environment for the child: `ShellProcessRunner` assigns it verbatim rather
+    /// than inheriting, so anything omitted here is simply absent from the child.
+    ///
+    /// - Parameters:
+    ///   - inherited: the environment to shape, normally `ProcessInfo.processInfo.environment`.
+    ///   - binaryPath: the resolved `claude` binary; its own directory goes first on `PATH`
+    ///     because a version-managed install keeps its node runtime beside it.
+    public static func childEnvironment(
+        inherited: [String: String],
+        binaryPath: String,
+        home: String = NSHomeDirectory()
+    ) -> [String: String] {
+        var environment = inherited
+        // An API key present on the machine would shadow the subscription login and quietly bill an
+        // organisation instead. This provider is subscription-only, by construction.
+        environment.removeValue(forKey: "ANTHROPIC_API_KEY")
+        environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
+        environment["MAX_THINKING_TOKENS"] = "0"
+        // A GUI app launched from Finder inherits a minimal PATH. Prefix the binary's own directory
+        // and the known install directories, keeping whatever we did inherit as the tail.
+        let directories = [(binaryPath as NSString).deletingLastPathComponent]
+            + expandedSearchDirectories(home: home)
+        environment["PATH"] = (directories + [inherited["PATH"] ?? ""])
+            .filter { !$0.isEmpty }
+            .joined(separator: ":")
+        return environment
     }
 
     /// The first usable candidate from `diskCandidatePaths`, or nil.

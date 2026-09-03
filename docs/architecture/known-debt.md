@@ -44,6 +44,27 @@ areas; stale debt notes are worse than none.
   path already reads through the injected `optionStore` (`OpenClipJSHost` reads options read-only via
   `ActionOptionReading`); `AppleScriptAction` does not consume options today.
 
+## AI Providers (Claude Code CLI)
+
+- **Cancelling the popup does not kill the `claude` child.** `ClaudeCLIProvider` cancels its task,
+  but `ShellProcessRunner` never consults task cancellation, so the orphan runs until the 30s
+  `Constants.scriptTimeout` watchdog kills its process group. This is **not** specific to this
+  provider — every existing shell, AppleScript and JS action shares it. Making the runner
+  cancellable would change when every extension's subprocess dies, so it was deliberately left
+  alone here rather than smuggled in behind one provider. The orphan writes no transcript
+  (`--no-session-persistence`).
+- **The Claude CLI resolution cache is deliberately not persisted.** `AIServiceManager`'s
+  `claudeBinaryPath` / `claudeResolutionDetail` are `@Published` runtime state, not settings — no
+  `@AppStorage`, no `SettingsStore`. A binary path goes stale across a CLI reinstall, a
+  version-manager switch or a home-directory move, and a persisted stale path fails at spawn with a
+  confusing error instead of simply being re-resolved. Cost: one login-shell spawn per app launch.
+  Do not "fix" this by persisting it.
+- **The Claude CLI provider is one-shot, not streaming.** `--output-format json` yields a single
+  envelope carrying the error flag and the usage data, so `processStream` yields the finished text
+  exactly once and finishes; the user sees a spinner rather than text arriving progressively. Every
+  other non-browser provider streams. Changing this means giving up the envelope (and with it the
+  `is_error` signal that classification depends on) for stream-json.
+
 ## Action Seams Already Implemented
 
 - **Coordinator composition is done.** `ActionCoordinator.loadInitialState()` wires `ExtensionManager`
