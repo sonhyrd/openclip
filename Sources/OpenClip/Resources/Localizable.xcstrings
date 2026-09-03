@@ -1431,6 +1431,26 @@
         }
       }
     },
+    "Found on disk: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在磁盘上找到：%@"
+          }
+        }
+      }
+    },
+    "Found via login shell: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过登录 Shell 找到：%@"
+          }
+        }
+      }
+    },
     "General": {
       "localizations": {
         "zh-Hans": {
@@ -3437,6 +3457,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "来自 @%@"
+          }
+        }
+      }
+    },
+    "claude not found — install Claude Code and run `claude login`": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 claude — 请安装 Claude Code 并运行 `claude login`"
           }
         }
       }

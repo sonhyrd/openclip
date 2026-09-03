@@ -380,6 +380,9 @@ TRANSLATIONS: dict[str, str] = {
     "Claude Code reported an error. Run `claude update` in Terminal, then try again.": "Claude Code 报告了一个错误。请在终端运行 `claude update` 后重试。",
     "Claude Code reported an error: %@": "Claude Code 报告了一个错误：%@",
     "Claude Code returned an empty response. Try again, or try a shorter selection.": "Claude Code 返回了空响应。请重试，或选择更短的文本。",
+    "Found via login shell: %@": "通过登录 Shell 找到：%@",
+    "Found on disk: %@": "在磁盘上找到：%@",
+    "claude not found — install Claude Code and run `claude login`": "未找到 claude — 请安装 Claude Code 并运行 `claude login`",
 }
 
 

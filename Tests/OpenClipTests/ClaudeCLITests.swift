@@ -206,6 +206,48 @@ extension ClaudeCLITests {
     }
 }
 
+// MARK: - Binary resolution (pure parts)
+
+extension ClaudeCLITests {
+    func testDiskCandidatesExpandTildeAndAppendTheBinaryName() {
+        let candidates = ClaudeCLI.diskCandidatePaths(home: "/Users/tester")
+        XCTAssertEqual(candidates.first, "/Users/tester/.claude/local/claude")
+        XCTAssertTrue(candidates.contains("/opt/homebrew/bin/claude"))
+        XCTAssertTrue(candidates.allSatisfy { $0.hasPrefix("/") && $0.hasSuffix("/claude") })
+        XCTAssertFalse(candidates.contains { $0.contains("~") })
+    }
+
+    func testAnExecutableFileIsUsable() throws {
+        let directory = try makeTemporaryDirectory()
+        let path = directory.appendingPathComponent("claude").path
+        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: Data("#!/bin/sh\n".utf8),
+                                                     attributes: [.posixPermissions: 0o755]))
+        XCTAssertTrue(ClaudeCLI.isUsableBinary(atPath: path))
+    }
+
+    func testANonExecutableFileADirectoryAndARelativePathAreAllRejected() throws {
+        let directory = try makeTemporaryDirectory()
+        // `command -v` reporting a shell function or alias name rather than a path.
+        XCTAssertFalse(ClaudeCLI.isUsableBinary(atPath: "claude"))
+        XCTAssertFalse(ClaudeCLI.isUsableBinary(atPath: "/nonexistent/claude"))
+        // A directory literally named `claude` must not be spawned.
+        XCTAssertFalse(ClaudeCLI.isUsableBinary(atPath: directory.path))
+
+        let plainFile = directory.appendingPathComponent("claude").path
+        XCTAssertTrue(FileManager.default.createFile(atPath: plainFile, contents: Data(),
+                                                    attributes: [.posixPermissions: 0o644]))
+        XCTAssertFalse(ClaudeCLI.isUsableBinary(atPath: plainFile))
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ClaudeCLITests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+}
+
 extension ClaudeCLITests {
     /// Unwraps the failure half of a classification, or nil.
     fileprivate func failure(_ result: Result<ClaudeCLI.Success, ClaudeCLI.Failure>) -> ClaudeCLI.Failure? {
