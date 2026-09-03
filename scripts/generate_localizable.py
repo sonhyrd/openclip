@@ -367,6 +367,19 @@ TRANSLATIONS: dict[str, str] = {
     "Open AI settings": "打开 AI 设置",
     "Fetch available models live from API": "从 API 实时获取可用模型",
     "Fetch installed models from local Ollama instance": "从本机 Ollama 获取已安装模型",
+    # Claude Code CLI provider failures
+    "Claude Code CLI not found. Install it, run `claude login`, then use Re-detect in Preferences → AI.": "未找到 Claude Code CLI。请先安装并运行 `claude login`，然后在“偏好设置 → AI”中点击重新检测。",
+    "Could not start the Claude Code CLI: %@. Check the path in Preferences → AI and use Re-detect.": "无法启动 Claude Code CLI：%@。请在“偏好设置 → AI”中检查路径并点击重新检测。",
+    "Claude Code did not respond within %lld seconds. Try again, or try a shorter selection.": "Claude Code 在 %lld 秒内没有响应。请重试，或选择更短的文本。",
+    "Claude Code exited with code %lld. Run `claude doctor` in Terminal to check your installation.": "Claude Code 以代码 %lld 退出。请在终端运行 `claude doctor` 检查安装状态。",
+    "Claude Code exited with code %lld: %@": "Claude Code 以代码 %lld 退出：%@",
+    "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again.": "你的 Claude Code CLI 拒绝了此请求 — 版本可能过旧。请在终端运行 `claude update` 后重试。",
+    "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again. Details: %@": "你的 Claude Code CLI 拒绝了此请求 — 版本可能过旧。请在终端运行 `claude update` 后重试。详情：%@",
+    "Claude Code is not logged in. Run `claude login` in Terminal, then try again.": "Claude Code 尚未登录。请在终端运行 `claude login` 后重试。",
+    "Claude Code returned a response OpenClip could not read. Run `claude update` in Terminal, then try again.": "Claude Code 返回了 OpenClip 无法解析的响应。请在终端运行 `claude update` 后重试。",
+    "Claude Code reported an error. Run `claude update` in Terminal, then try again.": "Claude Code 报告了一个错误。请在终端运行 `claude update` 后重试。",
+    "Claude Code reported an error: %@": "Claude Code 报告了一个错误：%@",
+    "Claude Code returned an empty response. Try again, or try a shorter selection.": "Claude Code 返回了空响应。请重试，或选择更短的文本。",
 }
 
 
