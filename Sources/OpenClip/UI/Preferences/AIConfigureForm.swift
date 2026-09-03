@@ -47,6 +47,7 @@ public struct AIConfigureForm: View {
                     Text("Ollama").tag(AIProviderType.ollama.rawValue)
                     Text("Cloud API").tag(AIProviderType.cloud.rawValue)
                     Text("Browser").tag(AIProviderType.browser.rawValue)
+                    Text("Claude CLI").tag(AIProviderType.claudeCLI.rawValue)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()

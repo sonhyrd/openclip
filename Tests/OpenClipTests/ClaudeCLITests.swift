@@ -197,6 +197,29 @@ extension ClaudeCLITests {
         XCTAssertEqual(success.modelUsage, .unexpected(reportedModels: ["some-other-model"]))
     }
 
+    /// `usage.output_tokens_details.thinking_tokens`, as measured against CLI 2.1.259. The
+    /// provider logs it to confirm `MAX_THINKING_TOKENS=0` actually took effect.
+    func testThinkingTokensAreDecodedFromTheUsageBlock() {
+        let stdout = """
+        {"is_error":false,"result":"Corrected text.",\
+        "usage":{"output_tokens":9,"output_tokens_details":{"thinking_tokens":0}}}
+        """
+        guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
+            return XCTFail("Expected a success")
+        }
+        XCTAssertEqual(success.thinkingTokens, 0)
+    }
+
+    /// A usage block that moved or changed shape is a telemetry loss, never a failed transform.
+    func testAReshapedUsageBlockLosesOnlyTheTokenCount() {
+        let stdout = #"{"is_error":false,"result":"Corrected text.","usage":"moved"}"#
+        guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
+            return XCTFail("A reshaped usage block must never be a failure")
+        }
+        XCTAssertEqual(success.text, "Corrected text.")
+        XCTAssertNil(success.thinkingTokens)
+    }
+
     func testMissingModelUsageMapEntirelyIsStillASuccess() {
         let stdout = envelopeJSON(isError: false, result: "Corrected text.")
         guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {

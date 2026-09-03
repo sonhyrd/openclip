@@ -65,12 +65,33 @@ extension ClaudeCLI {
         /// the pinned model plus a Haiku side-call the CLI makes on its own — and one entry under
         /// a trivial prompt. Read it by key; never by position.
         public let modelUsage: [String: ModelUsage]?
+        /// `usage.output_tokens_details.thinking_tokens`, measured against CLI 2.1.259. Telemetry
+        /// only: the provider logs it to confirm `MAX_THINKING_TOKENS=0` is actually taking effect.
+        /// Absent or unreadable is normal and never fatal.
+        public let thinkingTokens: Int?
 
         private enum CodingKeys: String, CodingKey {
             // Note the mixed casing: the CLI emits `is_error` but `modelUsage`.
             case isError = "is_error"
             case result
             case modelUsage
+            case usage
+        }
+
+        private struct Usage: Decodable {
+            struct OutputTokensDetails: Decodable {
+                let thinkingTokens: Int?
+
+                private enum CodingKeys: String, CodingKey {
+                    case thinkingTokens = "thinking_tokens"
+                }
+            }
+
+            let outputTokensDetails: OutputTokensDetails?
+
+            private enum CodingKeys: String, CodingKey {
+                case outputTokensDetails = "output_tokens_details"
+            }
         }
 
         public init(from decoder: any Decoder) throws {
@@ -78,12 +99,16 @@ extension ClaudeCLI {
             isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
             result = try container.decodeIfPresent(String.self, forKey: .result) ?? ""
             modelUsage = try container.decodeIfPresent([String: ModelUsage].self, forKey: .modelUsage)
+            // `try?`, not `try`: a reshaped usage block is a telemetry loss, never a reason to
+            // refuse the transformed text sitting in `result`.
+            thinkingTokens = (try? container.decode(Usage.self, forKey: .usage))?.outputTokensDetails?.thinkingTokens
         }
 
-        public init(isError: Bool, result: String, modelUsage: [String: ModelUsage]? = nil) {
+        public init(isError: Bool, result: String, modelUsage: [String: ModelUsage]? = nil, thinkingTokens: Int? = nil) {
             self.isError = isError
             self.result = result
             self.modelUsage = modelUsage
+            self.thinkingTokens = thinkingTokens
         }
     }
 
@@ -156,10 +181,13 @@ extension ClaudeCLI {
     public struct Success: Sendable, Equatable {
         public let text: String
         public let modelUsage: ModelUsageOutcome
+        /// Reported thinking tokens, for the caller's log. nil when the envelope carried none.
+        public let thinkingTokens: Int?
 
-        public init(text: String, modelUsage: ModelUsageOutcome) {
+        public init(text: String, modelUsage: ModelUsageOutcome, thinkingTokens: Int? = nil) {
             self.text = text
             self.modelUsage = modelUsage
+            self.thinkingTokens = thinkingTokens
         }
     }
 }
@@ -333,7 +361,11 @@ extension ClaudeCLI {
             let text = envelope.result.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return .failure(.emptyOutput) }
             // A miss here is data for the caller's log. It cannot produce a failure.
-            return .success(Success(text: text, modelUsage: modelUsageOutcome(envelope.modelUsage)))
+            return .success(Success(
+                text: text,
+                modelUsage: modelUsageOutcome(envelope.modelUsage),
+                thinkingTokens: envelope.thinkingTokens
+            ))
         }
 
         let haystack = stderr.lowercased()

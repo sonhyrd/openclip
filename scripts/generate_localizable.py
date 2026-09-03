@@ -367,6 +367,9 @@ TRANSLATIONS: dict[str, str] = {
     "Open AI settings": "打开 AI 设置",
     "Fetch available models live from API": "从 API 实时获取可用模型",
     "Fetch installed models from local Ollama instance": "从本机 Ollama 获取已安装模型",
+    # Claude Code CLI provider
+    "Claude Code (local CLI)": "Claude Code（本地 CLI）",
+    "Claude CLI": "Claude CLI",
     # Claude Code CLI provider failures
     "Claude Code CLI not found. Install it, run `claude login`, then use Re-detect in Preferences → AI.": "未找到 Claude Code CLI。请先安装并运行 `claude login`，然后在“偏好设置 → AI”中点击重新检测。",
     "Could not start the Claude Code CLI: %@. Check the path in Preferences → AI and use Re-detect.": "无法启动 Claude Code CLI：%@。请在“偏好设置 → AI”中检查路径并点击重新检测。",
