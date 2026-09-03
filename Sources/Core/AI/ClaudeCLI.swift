@@ -234,6 +234,54 @@ extension ClaudeCLI {
     }
 }
 
+// MARK: - Binary resolution (pure parts)
+
+extension ClaudeCLI {
+    /// The executable OpenClip looks for.
+    public static let binaryName = "claude"
+
+    /// Directories scanned when the login shell yields nothing — the documented Claude Code install
+    /// locations plus the usual user-level bin directories. Order is preference order; `~` is
+    /// expanded against the current user's home at call time, so this stays a plain list.
+    ///
+    /// Foundation only, on purpose: no `Constants`, no `Log`, no `ShellProcessRunner`. The process
+    /// launch that consults this list lives in the app target.
+    public static let searchDirectories = [
+        "~/.claude/local",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "~/.local/bin",
+        "~/.bun/bin",
+        "/usr/bin",
+    ]
+
+    /// Whether a resolution candidate is worth spawning: an absolute path that exists, is not a
+    /// directory, and carries the executable bit. `command -v` can report a shell function or an
+    /// alias name instead of a path, which this rejects for the same reason.
+    public static func isUsableBinary(atPath path: String, fileManager: FileManager = .default) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            return false
+        }
+        return fileManager.isExecutableFile(atPath: path)
+    }
+
+    /// The candidate paths to test, in order — `searchDirectories` with `~` expanded and the binary
+    /// name appended. Pure: touches no filesystem, so it is directly assertable in a test.
+    public static func diskCandidatePaths(home: String = NSHomeDirectory()) -> [String] {
+        searchDirectories.map { directory in
+            let expanded = directory.hasPrefix("~/") ? home + String(directory.dropFirst(1)) : directory
+            return expanded + "/" + binaryName
+        }
+    }
+
+    /// The first usable candidate from `diskCandidatePaths`, or nil.
+    public static func resolveOnDisk(home: String = NSHomeDirectory(), fileManager: FileManager = .default) -> String? {
+        diskCandidatePaths(home: home).first { isUsableBinary(atPath: $0, fileManager: fileManager) }
+    }
+}
+
 // MARK: - Classification
 
 extension ClaudeCLI {
