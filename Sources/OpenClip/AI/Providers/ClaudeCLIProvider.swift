@@ -43,7 +43,10 @@ public final class ClaudeCLIProvider: AIProvider {
                         arguments: ClaudeCLI.arguments(
                             prompt: AIRequestSupport.systemPrompt(for: prompt) + Self.stdinSentence
                         ),
-                        environment: Self.childEnvironment(binaryPath: binary),
+                        environment: ClaudeCLI.childEnvironment(
+                            inherited: ProcessInfo.processInfo.environment,
+                            binaryPath: binary
+                        ),
                         // The selection goes over stdin and is never an argument, so quotes,
                         // backticks and newlines in it can't be misread as flags.
                         stdinText: AIRequestSupport.userContent(for: input),
@@ -84,26 +87,6 @@ public final class ClaudeCLIProvider: AIProvider {
             // writes no transcript (`--no-session-persistence`). Known and accepted.
             continuation.onTermination = { _ in task.cancel() }
         }
-    }
-
-    /// A complete environment — `ShellProcessRunner` assigns it verbatim rather than inheriting, so
-    /// anything omitted here is simply absent from the child.
-    private static func childEnvironment(binaryPath: String) -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
-        // An API key present on the machine would shadow the subscription login and quietly bill an
-        // organisation instead. This provider is subscription-only, by construction.
-        environment.removeValue(forKey: "ANTHROPIC_API_KEY")
-        environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
-        environment["MAX_THINKING_TOKENS"] = "0"
-        // A GUI app launched from Finder inherits a minimal PATH. Prefix the binary's own directory
-        // (a version-managed install keeps its node runtime beside it) and the known install
-        // directories, keeping whatever we did inherit as the tail.
-        let directories = [(binaryPath as NSString).deletingLastPathComponent]
-            + ClaudeCLI.searchDirectories.map { ($0 as NSString).expandingTildeInPath }
-        environment["PATH"] = (directories + [environment["PATH"] ?? ""])
-            .filter { !$0.isEmpty }
-            .joined(separator: ":")
-        return environment
     }
 
     /// `runCapturingExit` throws only on the watchdog kill and on a failed spawn — a non-zero exit

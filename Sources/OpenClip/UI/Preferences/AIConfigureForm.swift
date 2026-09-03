@@ -170,6 +170,13 @@ public struct AIConfigureForm: View {
                         .help("Re-detect the Claude Code CLI installation")
                         .disabled(isRedetectingClaudeCLI)
                     }
+                    // Resolution is lazy, so without this the user would sit on a fourth state
+                    // ("Not detected yet.") until they pressed Re-detect or ran a transform. Only
+                    // when this branch is on screen — never at app launch.
+                    .task {
+                        guard aiManager.claudeResolutionDetail.isEmpty else { return }
+                        try? await aiManager.resolvedClaudeBinaryPath()
+                    }
                 } else if aiManager.activeProviderType == .browser {
                     Picker("Default Chatbot", selection: $aiManager.browserPreset) {
                         Text("ChatGPT (OpenAI)").tag("chatgpt")

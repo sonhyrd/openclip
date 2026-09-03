@@ -85,12 +85,6 @@ public final class AIServiceManager: ObservableObject {
     /// resolution has run once.
     @Published public private(set) var claudeResolutionDetail: String = ""
 
-    /// Resolution gets its **own** 10-second budget, separate from the 30-second invocation budget:
-    /// a zsh *login* shell sources the user's entire profile, so a version manager that phones home,
-    /// a hung completion initialiser, or an interactive `read` in a profile script can block
-    /// indefinitely. Bounding it here keeps a pathological profile from wedging the first transform.
-    private nonisolated static let claudeResolutionTimeout: TimeInterval = 10
-
     /// The cached path, resolving once on first use.
     /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves — never a silent nil.
     @discardableResult
@@ -110,6 +104,9 @@ public final class AIServiceManager: ObservableObject {
             Log.ai.error("Claude CLI not found via login shell or known install directories")
             throw ClaudeCLI.Failure.notFound
         }
+        // `.public` on a `~/…` path that contains the username, deliberately: a redacted path
+        // defeats the entire diagnostic purpose for this feature's number-one failure mode, and the
+        // same path is already shown to the user in Preferences → AI.
         Log.ai.info("Claude CLI resolved at \(path, privacy: .public)")
         return path
     }
@@ -140,7 +137,7 @@ public final class AIServiceManager: ObservableObject {
             // The real environment, so HOME/USER are set and the login shell finds the profile
             // files whose PATH exports are the whole point of using `-l`.
             environment: ProcessInfo.processInfo.environment,
-            timeout: claudeResolutionTimeout
+            timeout: ClaudeCLI.discoveryTimeout
         )
         guard let output = try? await ShellProcessRunner.runCapturingExit(invocation),
               output.terminationStatus == 0 else {
@@ -286,7 +283,7 @@ public final class AIServiceManager: ObservableObject {
         case .claudeCLI:
             // The provider is handed the manager's cached resolver, not a path: this property
             // rebuilds the provider on every access, so the cache has to outlive it.
-            return ClaudeCLIProvider(resolveBinaryPath: { [unowned self] in
+            return ClaudeCLIProvider(resolveBinaryPath: {
                 try await self.resolvedClaudeBinaryPath()
             })
         }
