@@ -283,6 +283,12 @@ public final class AIServiceManager: ObservableObject {
             return CloudAPIProvider(apiKey: cloudAPIKey, model: cloudModel, serviceProvider: cloudServiceProvider, customBaseURL: cloudCustomURL)
         case .browser:
             return BrowserRedirectProvider(template: effectiveBrowserURLTemplate)
+        case .claudeCLI:
+            // The provider is handed the manager's cached resolver, not a path: this property
+            // rebuilds the provider on every access, so the cache has to outlive it.
+            return ClaudeCLIProvider(resolveBinaryPath: { [unowned self] in
+                try await self.resolvedClaudeBinaryPath()
+            })
         }
     }
 }

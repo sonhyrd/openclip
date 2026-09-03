@@ -681,6 +681,26 @@
         }
       }
     },
+    "Claude CLI": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude CLI"
+          }
+        }
+      }
+    },
+    "Claude Code (local CLI)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code（本地 CLI）"
+          }
+        }
+      }
+    },
     "Claude Code CLI not found. Install it, run `claude login`, then use Re-detect in Preferences → AI.": {
       "localizations": {
         "zh-Hans": {
