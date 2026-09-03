@@ -4,6 +4,7 @@
 // Reusable AI engine + provider configuration form, shared by the AI preferences
 // tab and the first-launch onboarding flow so both surfaces expose the same settings.
 import SwiftUI
+import Core
 
 @MainActor
 public struct AIConfigureForm: View {
@@ -18,6 +19,8 @@ public struct AIConfigureForm: View {
     @State private var isFetchingOllamaModels: Bool = false
     @State private var ollamaFetchError: String? = nil
     @State private var ollamaFetchGeneration: Int = 0
+
+    @State private var isRedetectingClaudeCLI: Bool = false
 
     public init() {}
 
@@ -134,6 +137,39 @@ public struct AIConfigureForm: View {
                             .font(.caption)
                             .foregroundColor(.red)
                     }
+                } else if aiManager.activeProviderType == .claudeCLI {
+                    // The model is pinned and stated, never picked: a floating alias is exactly what
+                    // the dated pin exists to forbid, so this row is read-only by design.
+                    HStack(spacing: 8) {
+                        Text("Model")
+                        Spacer()
+                        Text(verbatim: ClaudeCLI.model)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Command Line Tool")
+                            Text(aiManager.claudeResolutionDetail.isEmpty
+                                 ? String(localized: "Not detected yet.")
+                                 : aiManager.claudeResolutionDetail)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button(action: redetectClaudeCLI) {
+                            if isRedetectingClaudeCLI {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Re-detect the Claude Code CLI installation")
+                        .disabled(isRedetectingClaudeCLI)
+                    }
                 } else if aiManager.activeProviderType == .browser {
                     Picker("Default Chatbot", selection: $aiManager.browserPreset) {
                         Text("ChatGPT (OpenAI)").tag("chatgpt")
@@ -233,6 +269,17 @@ public struct AIConfigureForm: View {
                     self.isFetchingOllamaModels = false
                 }
             }
+        }
+    }
+
+    /// Re-runs binary resolution. The error is swallowed deliberately: `claudeResolutionDetail`
+    /// already states the outcome in the row above, and a second error surface for the same fact
+    /// would just say it twice.
+    private func redetectClaudeCLI() {
+        isRedetectingClaudeCLI = true
+        Task { @MainActor in
+            try? await aiManager.redetectClaudeCLI()
+            isRedetectingClaudeCLI = false
         }
     }
 }

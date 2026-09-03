@@ -841,6 +841,16 @@
         }
       }
     },
+    "Command Line Tool": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命令行工具"
+          }
+        }
+      }
+    },
     "Condense this text to be as concise as possible while keeping all essential information": {
       "localizations": {
         "zh-Hans": {
@@ -2071,6 +2081,16 @@
         }
       }
     },
+    "Not detected yet.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未检测。"
+          }
+        }
+      }
+    },
     "OK": {
       "localizations": {
         "zh-Hans": {
@@ -2527,6 +2547,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "退出 OpenClip"
+          }
+        }
+      }
+    },
+    "Re-detect the Claude Code CLI installation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新检测 Claude Code CLI 安装"
           }
         }
       }
