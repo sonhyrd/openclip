@@ -97,7 +97,7 @@ public final class DefaultActionFactory: ActionFactory, Sendable {
         index: Int
     ) async -> (any Action)? {
         guard let base = await makeAction(metadata: metadata, manifest: manifest, directoryURL: directoryURL, index: index, forcedID: nil) else { return nil }
-        return decorate(base, metadata: metadata)
+        return decorate(base, metadata: metadata, manifest: manifest)
     }
 
     /// Materializes every registry entry for one manifest action. Non-group actions return the
@@ -112,7 +112,7 @@ public final class DefaultActionFactory: ActionFactory, Sendable {
     ) async -> [any Action] {
         guard metadata.kind == .group else {
             guard let action = await makeAction(metadata: metadata, manifest: manifest, directoryURL: directoryURL, index: index, forcedID: nil) else { return [] }
-            return [decorate(action, metadata: metadata)]
+            return [decorate(action, metadata: metadata, manifest: manifest)]
         }
 
         let groupID = ExtensionManager.uniformActionID(metadata: metadata, manifest: manifest, index: index)
@@ -128,17 +128,19 @@ public final class DefaultActionFactory: ActionFactory, Sendable {
             source: .extensionPkg(packageID: manifest.identifier)
         )
         let groupIcon = ExtensionManager.parseIcon(metadata.icon, directoryURL: directoryURL)
+        let groupKeywords = (metadata.keywords ?? []) + (manifest.keywords ?? [])
         var result: [any Action] = [GroupAction(
             id: groupID,
             title: metadata.title ?? manifest.name,
             icon: groupIcon,
             chrome: groupChrome,
-            rules: groupRules
+            rules: groupRules,
+            keywords: groupKeywords
         )]
         for (subIndex, sub) in (metadata.subActions ?? []).enumerated() where sub.kind != .group {
             let subID = "\(groupID).\(sub.id ?? String(subIndex))"
             if let action = await makeAction(metadata: sub, manifest: manifest, directoryURL: directoryURL, index: subIndex, forcedID: subID, inheritedIcon: groupIcon) {
-                result.append(decorate(action, metadata: sub))
+                result.append(decorate(action, metadata: sub, manifest: manifest))
             }
         }
         return result
@@ -152,8 +154,12 @@ public final class DefaultActionFactory: ActionFactory, Sendable {
     /// `DeliveryDecoratedAction` carrying the mapped `ActionDelivery`. The wraps compose: the
     /// menuRelevance wrapper stays outermost so `RelevanceProviding` surfaces on the registered
     /// action, with `MenuDecoratedAction` forwarding `delivery` through to the inner wrapper.
-    private func decorate(_ action: any Action, metadata: ExtensionActionMetadata) -> any Action {
+    private func decorate(_ action: any Action, metadata: ExtensionActionMetadata, manifest: ExtensionMetadata? = nil) -> any Action {
         var result = action
+        let declaredKeywords = (metadata.keywords ?? []) + (manifest?.keywords ?? [])
+        if !declaredKeywords.isEmpty {
+            result = KeywordDecoratedAction(base: result, keywords: declaredKeywords)
+        }
         if let delivery = delivery(from: metadata) {
             result = DeliveryDecoratedAction(base: result, delivery: delivery)
         }
@@ -366,6 +372,15 @@ public final class DefaultActionFactory: ActionFactory, Sendable {
         let scriptName = metadata.script ?? Constants.defaultScriptName
         let scriptURL = directoryURL.appendingPathComponent(scriptName)
         let ext = scriptURL.pathExtension.lowercased()
+
+        guard !scriptName.hasPrefix("/"),
+              !scriptName.hasPrefix("~"),
+              !scriptName.contains(":"),
+              Constants.isPathSafe(destinationURL: scriptURL, baseDirectory: directoryURL),
+              scriptURL.standardized.path != directoryURL.standardized.path else {
+            Log.factory.error("Script path escapes extension directory: \(scriptName, privacy: .public)")
+            return nil
+        }
 
         // Guard against garbage metadata: with neither url, scriptCode, nor an existing script file,
         // there is nothing executable to run. A directory (fileExists is true for directories) or a

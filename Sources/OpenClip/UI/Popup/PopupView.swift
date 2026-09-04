@@ -485,7 +485,7 @@ public struct PopupView: View {
                     onRunAI(actionID)
                 } else {
                     guard let preset = aiManager.preset(forActionID: actionID) else { return }
-                    runAIPreset(prompt: preset.prompt, title: preset.title)
+                    runAIPreset(prompt: aiManager.promptForPreset(preset), title: preset.title)
                 }
             },
             onActionPerformed: onActionPerformed,
@@ -709,7 +709,7 @@ public struct PopupView: View {
         let foregroundColor: Color = isHovered ? .white : restForeground
 
         let isGroup = action.gesturePolicy.singleClick == .openSubActions || action.chrome.launchesAI
-        let subBarAbove = modeStore.searchResultsAbove
+        let subBarAbove = modeStore.subBarAbove
 
         let labelView = iconView(for: action.displayIcon(using: presenter))
             .foregroundColor(foregroundColor)

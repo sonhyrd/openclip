@@ -38,6 +38,19 @@ interface OpenClipBridge {
   };
   options: Record<string, string>; // Resolved option values (values only, read-only)
   option(id: string): string | undefined; // Functional form of options[id]
+  locale: string;          // User's active locale identifier (e.g. "zh_CN", "en_US")
+  language: string;        // Active language/script tag (e.g. "zh-Hans", "en")
+  i18n(dict: Record<string, string>): string; // Resolves dictionary against active language with fallbacks
+  pasteboard: {
+    text: string;          // Plain text content (getter/setter emits openclip.copy)
+    html: string;          // HTML content (getter/setter emits openclip.copyContent({ html }))
+    rtf: string;           // RTF content (getter/setter emits openclip.copyContent({ rtf }))
+    content: Record<string, string>; // Multi-flavor content (getter/setter emits copyContent)
+    hasContent: boolean;   // True if non-empty, non-concealed content exists
+    hasHtml: boolean;      // True if HTML flavor is available
+    hasRtf: boolean;       // True if RTF flavor is available
+    types: string[];       // UTI types on the pasteboard
+  };
 
   // Effect functions (call order is preserved):
   paste(value: string): void;
@@ -103,7 +116,21 @@ function action(selection) {
 
 The effect the branch picks becomes the action's primary result, so the standard delivery pipeline
 still applies to it (the paste→copy probe, and the click's declared `toast`/`secondaryToast`, see
-[`docs/developer-guide/AGENTS.md` §5b/§5c](../developer-guide/AGENTS.md)).
+[`Extensions/AGENTS.md` §5b/§5c](../../Extensions/AGENTS.md)).
+
+## Pasteboard API (`openclip.pasteboard`)
+
+`openclip.pasteboard` provides a snapshot of the current system pasteboard at the time the action runs, with reactive getters and setters:
+
+- `openclip.pasteboard.text`: Getter returns plain text string. Setting it (`openclip.pasteboard.text = "..."`) triggers an `openclip.copy(...)` effect.
+- `openclip.pasteboard.html`: Getter returns HTML string. Setting it triggers `openclip.copyContent({ html: "..." })`.
+- `openclip.pasteboard.rtf`: Getter returns RTF string. Setting it triggers `openclip.copyContent({ rtf: "..." })`.
+- `openclip.pasteboard.content`: Getter returns a dictionary of available types and their representations. Setting it triggers `openclip.copyContent(...)`.
+- `openclip.pasteboard.hasContent`: Boolean indicating whether non-empty, non-concealed clipboard content is present.
+- `openclip.pasteboard.hasHtml` / `openclip.pasteboard.hasRtf`: Booleans indicating whether HTML or RTF flavors exist.
+- `openclip.pasteboard.types`: String array of available UTI types (e.g. `["public.utf8-plain-text", "public.html"]`).
+
+*Privacy Guard*: If the clipboard contains concealed types from password managers (e.g. `org.nspasteboard.ConcealedType`, `com.agilebits.onepassword`), `hasContent` returns `false` and text/html/rtf values are redacted to empty strings.
 
 ## Async Mode (`"async": true`)
 
@@ -140,8 +167,8 @@ Every run executes inside a `Task.detached` on a background thread — never the
 JavaScript VM access is confined to that single thread; URLSession completions hop back onto the
 thread's CFRunLoop via `CFRunLoopPerformBlock` + `CFRunLoopWakeUp`, and the host pumps the runloop
 until the promise settles. A watchdog (`TimeoutFlag`, mirroring the `ShellProcessRunner` pattern)
-throws `Script timed out after N seconds` after `Constants.scriptTimeout` (30 s; tests override via
-`Request.timeout`).
+throws `Script timed out after N seconds` after `Constants.scriptTimeout` (60 s; tests override via
+`Request.timeout`). Running async tasks can also be cancelled immediately by clicking the loading toast, which cancels in-flight fetch requests.
 
 **Synchronous evaluations are capped.** A CPU-bound synchronous script cannot be interrupted
 (`JSVirtualMachine.invalidate` no longer exists), so a stuck sync script would permanently park a

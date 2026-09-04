@@ -46,12 +46,13 @@ areas; stale debt notes are worse than none.
 
 ## AI Providers (Claude Code CLI)
 
-- **Cancelling the popup does not kill the `claude` child.** `ClaudeCLIProvider` cancels its task,
-  but `ShellProcessRunner` never consults task cancellation, so the orphan runs until the 30s
-  `Constants.scriptTimeout` watchdog kills its process group. This is **not** specific to this
-  provider — every existing shell, AppleScript and JS action shares it. Making the runner
-  cancellable would change when every extension's subprocess dies, so it was deliberately left
-  alone here rather than smuggled in behind one provider. The orphan writes no transcript
+- **Resolved in 1.3.0: cancelling the popup now kills the `claude` child.** Upstream made
+  `ShellProcessRunner` consult task cancellation (`ProcessBox` +
+  `withTaskCancellationHandler`), and this fork's `runCapturingExit` is the same execution path,
+  so `ClaudeCLIProvider`'s task cancellation terminates the child's process group immediately
+  instead of leaving an orphan. The `Constants.scriptTimeout` watchdog (now **60 s**, upstream's
+  script budget) remains as the upper bound; this provider passes that shared constant rather
+  than a budget of its own. Either way the child writes no transcript
   (`--no-session-persistence`).
 - **The Claude CLI resolution cache is deliberately not persisted.** `AIServiceManager`'s
   `claudeBinaryPath` / `claudeResolutionDetail` are `@Published` runtime state, not settings — no
@@ -89,7 +90,7 @@ areas; stale debt notes are worse than none.
   the click intent, and the unified paste
   availability. The old `after` translator (the pre-refactor `after` orchestration step and its
   adapter) is **fully removed**. Async JS runs are guarded by the
-  `TimeoutFlag` watchdog (30 s, same pattern as `ShellProcessRunner`).
+  `TimeoutFlag` watchdog (60 s, same pattern as `ShellProcessRunner`) and cooperative Swift task cancellation.
 - **Custom Action Groups use canonical IDs with dynamic materialization and strict $\ge 2$ member invariant.**
   User-defined action groups are defined via `ActionGroupDef` (`Sources/Core/Actions/ActionGroupDef.swift`),
   stored as JSON in `SettingKey.actionGroups`. Rather than rewriting action identifiers with virtual ID
@@ -225,6 +226,11 @@ areas; stale debt notes are worse than none.
   the popup open for the card render (Task 4) — dismissal for `.text` is decided by the controller's
   `shouldDismiss`, not `dismissesPopup`. The loading re-show path (`settleLoadingResult`)
   re-creates the popup from the pre-early-close selection snapshot to present the card.
+  - **Target application and delivery context snapshotted before perform.** Asynchronous actions snapshot
+    the target application, app policy, and declared delivery into an `inFlightDeliveryContext` (or local task
+    constant) before performing. If the user switches applications while an asynchronous action is executing,
+    `resolveDelivery` detects that the target application is no longer active and safely downgrades `.paste`
+    to `.copy` with a "Copied" toast to prevent pasting into the newly focused application.
   - **Re-show binds to the current frontmost app.** The loading-preview re-show
     (`settleLoadingResult`) re-creates the popup from the selection snapshot, but `hide()`
     clears `previousFrontmostApp`, so the re-show re-captures whatever is frontmost at settle

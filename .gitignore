@@ -18,6 +18,7 @@ codebase_bundle.xml
 graphify-out/
 web/
 scripts/bin/
-Extensions/
+/Extensions/
+skills-lock.json
 # Review handoff artifact written by sss:pr-review; not PR content.
 .pw-prove/
