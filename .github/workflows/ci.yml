@@ -34,3 +34,13 @@ jobs:
 
       - name: Build App (Release)
         run: ./scripts/package_app.sh
+
+      # The zip package_app.sh produces was built and then discarded. Without this
+      # the only way to get a runnable OpenClip.app is a local Xcode install, which
+      # is exactly what CI exists to avoid needing.
+      - name: Upload OpenClip.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenClip-${{ github.sha }}
+          path: build/OpenClip.zip
+          if-no-files-found: error

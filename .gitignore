@@ -19,3 +19,5 @@ graphify-out/
 web/
 scripts/bin/
 Extensions/
+# Review handoff artifact written by sss:pr-review; not PR content.
+.pw-prove/

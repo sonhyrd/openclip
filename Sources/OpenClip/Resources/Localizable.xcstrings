@@ -681,6 +681,116 @@
         }
       }
     },
+    "Claude CLI": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude CLI"
+          }
+        }
+      }
+    },
+    "Claude Code (local CLI)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code（本地 CLI）"
+          }
+        }
+      }
+    },
+    "Claude Code CLI not found. Install it, run `claude login`, then use Re-detect in Preferences → AI.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 Claude Code CLI。请先安装并运行 `claude login`，然后在“偏好设置 → AI”中点击重新检测。"
+          }
+        }
+      }
+    },
+    "Claude Code did not respond within %lld seconds. Try again, or try a shorter selection.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 在 %lld 秒内没有响应。请重试，或选择更短的文本。"
+          }
+        }
+      }
+    },
+    "Claude Code exited with code %lld. Run `claude doctor` in Terminal to check your installation.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 以代码 %lld 退出。请在终端运行 `claude doctor` 检查安装状态。"
+          }
+        }
+      }
+    },
+    "Claude Code exited with code %lld: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 以代码 %lld 退出：%@"
+          }
+        }
+      }
+    },
+    "Claude Code is not logged in. Run `claude login` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 尚未登录。请在终端运行 `claude login` 后重试。"
+          }
+        }
+      }
+    },
+    "Claude Code reported an error. Run `claude update` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 报告了一个错误。请在终端运行 `claude update` 后重试。"
+          }
+        }
+      }
+    },
+    "Claude Code reported an error: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 报告了一个错误：%@"
+          }
+        }
+      }
+    },
+    "Claude Code returned a response OpenClip could not read. Run `claude update` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 返回了 OpenClip 无法解析的响应。请在终端运行 `claude update` 后重试。"
+          }
+        }
+      }
+    },
+    "Claude Code returned an empty response. Try again, or try a shorter selection.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code 返回了空响应。请重试，或选择更短的文本。"
+          }
+        }
+      }
+    },
     "Close": {
       "localizations": {
         "zh-Hans": {
@@ -727,6 +837,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "颜色模式"
+          }
+        }
+      }
+    },
+    "Command Line Tool": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命令行工具"
           }
         }
       }
@@ -857,6 +977,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "拷贝回复到剪贴板并关闭（⏎）"
+          }
+        }
+      }
+    },
+    "Could not start the Claude Code CLI: %@. Check the path in Preferences → AI and use Re-detect.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法启动 Claude Code CLI：%@。请在“偏好设置 → AI”中检查路径并点击重新检测。"
           }
         }
       }
@@ -1327,6 +1457,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "正式语气"
+          }
+        }
+      }
+    },
+    "Found on disk: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在磁盘上找到：%@"
+          }
+        }
+      }
+    },
+    "Found via login shell: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过登录 Shell 找到：%@"
           }
         }
       }
@@ -1931,6 +2081,16 @@
         }
       }
     },
+    "Not detected yet.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未检测。"
+          }
+        }
+      }
+    },
     "OK": {
       "localizations": {
         "zh-Hans": {
@@ -2387,6 +2547,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "退出 OpenClip"
+          }
+        }
+      }
+    },
+    "Re-detect the Claude Code CLI installation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新检测 Claude Code CLI 安装"
           }
         }
       }
@@ -3311,12 +3481,42 @@
         }
       }
     },
+    "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Claude Code CLI 拒绝了此请求 — 版本可能过旧。请在终端运行 `claude update` 后重试。"
+          }
+        }
+      }
+    },
+    "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again. Details: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Claude Code CLI 拒绝了此请求 — 版本可能过旧。请在终端运行 `claude update` 后重试。详情：%@"
+          }
+        }
+      }
+    },
     "by @%@": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "来自 @%@"
+          }
+        }
+      }
+    },
+    "claude not found — install Claude Code and run `claude login`": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 claude — 请安装 Claude Code 并运行 `claude login`"
           }
         }
       }

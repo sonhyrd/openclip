@@ -10,6 +10,7 @@ public enum AIProviderType: String, CaseIterable, Identifiable, Sendable {
     case ollama = "ollama"
     case cloud = "cloud"
     case browser = "browser"
+    case claudeCLI = "claudeCLI"
 
     public var id: String { rawValue }
 
@@ -19,6 +20,7 @@ public enum AIProviderType: String, CaseIterable, Identifiable, Sendable {
         case .ollama: return String(localized: "Ollama (Local LLM)")
         case .cloud: return String(localized: "Cloud API (OpenAI/Claude)")
         case .browser: return String(localized: "Browser Redirection")
+        case .claudeCLI: return String(localized: "Claude Code (local CLI)")
         }
     }
 }

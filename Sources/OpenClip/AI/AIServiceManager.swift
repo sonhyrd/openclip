@@ -65,6 +65,88 @@ public final class AIServiceManager: ObservableObject {
         willSet { objectWillChange.send() }
     }
 
+    // MARK: - Claude Code CLI resolution cache
+    //
+    // Deliberately NOT persisted — no `@AppStorage`, no `SettingsStore`. A binary path is derived
+    // runtime state, not a setting: it goes stale across a CLI reinstall, a version-manager switch
+    // or a home-directory move, and a persisted stale path fails at spawn with a confusing error
+    // instead of simply being re-resolved. Do not "fix" this by persisting it. The repo's
+    // no-raw-`UserDefaults` rule governs settings; this is a cache. Cost: one login-shell spawn per
+    // app launch.
+    //
+    // It lives here, on the manager, rather than on the provider because `currentProvider` is a
+    // computed property that constructs a fresh provider on every access — a provider-held cache
+    // would be discarded between every call and each run would pay another login-shell spawn.
+
+    /// The resolved `claude` binary, or nil when resolution has not run or found nothing.
+    @Published public private(set) var claudeBinaryPath: String?
+
+    /// User-facing account of the last resolution attempt (shown in Preferences → AI). Empty until
+    /// resolution has run once.
+    @Published public private(set) var claudeResolutionDetail: String = ""
+
+    /// The cached path, resolving once on first use.
+    /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves — never a silent nil.
+    @discardableResult
+    public func resolvedClaudeBinaryPath() async throws -> String {
+        if let claudeBinaryPath { return claudeBinaryPath }
+        return try await redetectClaudeCLI()
+    }
+
+    /// Re-detection entry point: runs resolution again and overwrites both published values.
+    /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves.
+    @discardableResult
+    public func redetectClaudeCLI() async throws -> String {
+        let (path, detail) = await Self.detectClaudeBinary()
+        claudeBinaryPath = path
+        claudeResolutionDetail = detail
+        guard let path else {
+            Log.ai.error("Claude CLI not found via login shell or known install directories")
+            throw ClaudeCLI.Failure.notFound
+        }
+        // `.public` on a `~/…` path that contains the username, deliberately: a redacted path
+        // defeats the entire diagnostic purpose for this feature's number-one failure mode, and the
+        // same path is already shown to the user in Preferences → AI.
+        Log.ai.info("Claude CLI resolved at \(path, privacy: .public)")
+        return path
+    }
+
+    /// Login shell first, then the known install directories. Nonisolated: it only spawns a
+    /// subprocess and reads the filesystem; the caller lands both values back on the main actor.
+    private nonisolated static func detectClaudeBinary() async -> (path: String?, detail: String) {
+        if let path = await loginShellClaudePath() {
+            return (path, String(localized: "Found via login shell: \(path)"))
+        }
+        if let path = ClaudeCLI.resolveOnDisk() {
+            return (path, String(localized: "Found on disk: \(path)"))
+        }
+        return (nil, String(localized: "claude not found — install Claude Code and run `claude login`"))
+    }
+
+    /// `/bin/zsh -l -c "command -v claude"` — a **login** shell, because a GUI app launched from
+    /// Finder does not inherit the terminal's PATH. Without the `-l`, lookup fails on a machine
+    /// where `claude` works perfectly well in Terminal, and that reads to the user as "the app is
+    /// broken". This is the feature's number-one silent failure mode.
+    ///
+    /// Goes through the shared `ShellProcessRunner` executor (one watchdog, one process-group kill)
+    /// rather than a hand-rolled `Process`.
+    private nonisolated static func loginShellClaudePath() async -> String? {
+        let invocation = ShellProcessRunner.Invocation(
+            executableURL: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-l", "-c", "command -v \(ClaudeCLI.binaryName)"],
+            // The real environment, so HOME/USER are set and the login shell finds the profile
+            // files whose PATH exports are the whole point of using `-l`.
+            environment: ProcessInfo.processInfo.environment,
+            timeout: ClaudeCLI.discoveryTimeout
+        )
+        guard let output = try? await ShellProcessRunner.runCapturingExit(invocation),
+              output.terminationStatus == 0 else {
+            return nil
+        }
+        let candidate = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ClaudeCLI.isUsableBinary(atPath: candidate) ? candidate : nil
+    }
+
     public static let defaultPresets: [AIActionPreset] = [
         AIActionPreset(id: "proofread", title: String(localized: "Proofread"), prompt: String(localized: "Fix all spelling, punctuation, and grammatical errors while preserving the original wording, tone, and formatting"), isEnabled: true),
         AIActionPreset(id: "rewrite", title: String(localized: "Rewrite"), prompt: String(localized: "Rewrite to improve clarity, flow, and vocabulary while keeping the original meaning and language"), isEnabled: true),
@@ -198,6 +280,12 @@ public final class AIServiceManager: ObservableObject {
             return CloudAPIProvider(apiKey: cloudAPIKey, model: cloudModel, serviceProvider: cloudServiceProvider, customBaseURL: cloudCustomURL)
         case .browser:
             return BrowserRedirectProvider(template: effectiveBrowserURLTemplate)
+        case .claudeCLI:
+            // The provider is handed the manager's cached resolver, not a path: this property
+            // rebuilds the provider on every access, so the cache has to outlive it.
+            return ClaudeCLIProvider(resolveBinaryPath: {
+                try await self.resolvedClaudeBinaryPath()
+            })
         }
     }
 }
