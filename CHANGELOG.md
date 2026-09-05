@@ -4,6 +4,24 @@ All notable user-facing changes, feature additions, and improvements to OpenClip
 
 ---
 
+## v1.3.1 - 2026-09-05
+
+### Features & Improvements
+- **Direct Action Search**: Launch straight into the search palette via shortcut, centered on screen with instant focus, and dismiss cleanly with `Escape`.
+- **Search Alignment Clamping**: Fixed search palette positioning so it never overflows the action bar or screen bounds.
+- **Layered Glass Theme Contrast**: Upgraded glass surfaces with an adaptive backing scrim and specular borders to eliminate background bleed-through.
+- **Preferences Polish**: Renamed settings labels to "Horizontal Position" and "Popup Width" with updated translations.
+
+### Fixes & Stability
+- **Extension Store Resilience**: Added network retry handling, loading states, and offline diagnostics to the in-app extension store.
+
+### Fork Additions (sonhyrd/openclip)
+- **Claude Code CLI Provider**: AI actions can run on the local `claude` binary against your own Claude subscription — no API key. Isolated invocation (pinned dated model, no tools, no MCP, no settings sources, no session persistence) with `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` stripped from the child environment.
+- **No stray file-access prompts**: the `claude` child runs in an empty private working directory instead of inheriting OpenClip's `/`, so its startup directory walk can no longer reach `~/Desktop`, `~/Documents` or `~/Downloads` and raise macOS consent dialogs.
+- **Fork update feed**: updates now come from this fork's releases, so a fork build is never replaced by an upstream release that has no Claude CLI provider.
+
+---
+
 ## v1.3.0 - 2026-09-04
 
 ### Highlights
