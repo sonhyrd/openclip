@@ -386,6 +386,30 @@ extension ClaudeCLI {
         return environment
     }
 
+    /// The directory the `claude` child runs in: a private, **empty** folder under the temp
+    /// directory, created on demand.
+    ///
+    /// Claude Code indexes its working directory at startup — a ripgrep-style walk probing
+    /// `.gitignore`/`.rgignore` in every directory it can reach — even under `-p` with tools off.
+    /// Left to inherit OpenClip's cwd, which is `/` for a Finder-launched app, it crawled the whole
+    /// disk, and the moment the walk reached `~/Desktop`, `~/Documents` or `~/Downloads` macOS raised
+    /// an "OpenClip would like to access files in your Desktop folder" prompt attributed to OpenClip
+    /// (measured with `fs_usage`; one prompt per folder). An empty directory gives the walk nothing
+    /// to find. This is the cwd door beside the settings door (`--setting-sources ""`) and the
+    /// environment door (`strippedEnvironmentKeys`).
+    ///
+    /// Falls back to the temp directory itself if the folder cannot be created — still not `/`.
+    public static func isolatedWorkingDirectory(fileManager: FileManager = .default) -> URL {
+        let temp = fileManager.temporaryDirectory
+        let dir = temp.appendingPathComponent("openclip-claude-cli", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir
+        } catch {
+            return temp
+        }
+    }
+
     /// The first usable candidate from `diskCandidatePaths`, or nil.
     public static func resolveOnDisk(home: String = NSHomeDirectory(), fileManager: FileManager = .default) -> String? {
         diskCandidatePaths(home: home).first { isUsableBinary(atPath: $0, fileManager: fileManager) }

@@ -436,3 +436,23 @@ extension ClaudeCLITests {
         XCTAssertFalse(ClaudeCLI.expandedSearchDirectories(home: Self.home).contains { $0.contains("~") })
     }
 }
+
+// MARK: - Working directory
+
+extension ClaudeCLITests {
+    /// The child must never inherit OpenClip's cwd (`/` when Finder-launched): Claude Code walks its
+    /// working directory at startup, and from `/` that crawl reaches `~/Desktop`, `~/Documents` and
+    /// `~/Downloads` — one macOS consent prompt each, attributed to OpenClip.
+    func testIsolatedWorkingDirectoryIsAPrivateEmptyFolderNotRoot() throws {
+        let dir = ClaudeCLI.isolatedWorkingDirectory()
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertNotEqual(dir.standardizedFileURL.path, "/")
+        XCTAssertFalse(dir.path.hasPrefix(NSHomeDirectory() + "/Desktop"))
+        XCTAssertFalse(dir.path.hasPrefix(NSHomeDirectory() + "/Documents"))
+        XCTAssertFalse(dir.path.hasPrefix(NSHomeDirectory() + "/Downloads"))
+        // Empty: nothing for the CLI's directory walk to find.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
+    }
+}
