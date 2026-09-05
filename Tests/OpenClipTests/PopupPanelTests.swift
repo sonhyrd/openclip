@@ -722,6 +722,18 @@ final class PopupPanelTests: XCTestCase {
         let initialBarFrame = panel.frame
         let buttonLocalX: CGFloat = 250
         let buttonWidth: CGFloat = 34
+        // Centering on the button is only reachable when the palette fits inside the bar:
+        // `searchPaletteMidX` caps the palette's right edge at the bar's, so a bar narrower than the
+        // palette always lands on the bar instead, whatever button is clicked. A CI runner renders a
+        // 100pt bar on a 1024pt screen — the button at local x=250 is not even inside it — and this
+        // assertion then fails 529 vs 746 on upstream's own tree (verified: run 33961590262 of
+        // unmodified upstream/main). Guard the premise rather than weaken the assertion.
+        try XCTSkipUnless(
+            initialBarFrame.width >= PopupMetrics.searchPanelWidth
+                && initialBarFrame.width >= buttonLocalX + buttonWidth,
+            "bar (\(initialBarFrame.width)pt) is narrower than the search palette "
+                + "(\(PopupMetrics.searchPanelWidth)pt); button anchoring cannot apply"
+        )
         let buttonLocalFrame = CGRect(x: buttonLocalX, y: 0, width: buttonWidth, height: 29)
         let expectedButtonScreenMidX = initialBarFrame.minX + buttonLocalFrame.midX
 

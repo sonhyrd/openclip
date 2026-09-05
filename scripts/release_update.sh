@@ -96,7 +96,7 @@ if [ -z "$GENERATE_APPCAST" ]; then
     exit 1
 fi
 
-DOWNLOAD_PREFIX="https://github.com/ganeshmshetty/openclip/releases/download/v$VERSION/"
+DOWNLOAD_PREFIX="https://github.com/sonhyrd/openclip/releases/download/v$VERSION/"
 
 echo "==> Extracting release notes for v$VERSION from CHANGELOG.md..."
 NOTES_FILE="$BUILD_DIR/OpenClip-v$VERSION.md"
@@ -116,7 +116,7 @@ if [ -n "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
         --ed-key-file - \
         --download-url-prefix "$DOWNLOAD_PREFIX" \
         --embed-release-notes \
-        --full-release-notes-url "https://github.com/ganeshmshetty/openclip/releases/tag/v$VERSION" \
+        --full-release-notes-url "https://github.com/sonhyrd/openclip/releases/tag/v$VERSION" \
         -o appcast.xml \
         "$BUILD_DIR"
 else
@@ -124,7 +124,7 @@ else
         --account openclip \
         --download-url-prefix "$DOWNLOAD_PREFIX" \
         --embed-release-notes \
-        --full-release-notes-url "https://github.com/ganeshmshetty/openclip/releases/tag/v$VERSION" \
+        --full-release-notes-url "https://github.com/sonhyrd/openclip/releases/tag/v$VERSION" \
         -o appcast.xml \
         "$BUILD_DIR"
 fi

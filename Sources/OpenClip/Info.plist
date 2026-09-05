@@ -44,9 +44,9 @@
 	<key>SUAutomaticallyUpdate</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://github.com/ganeshmshetty/openclip/releases/latest/download/appcast.xml</string>
+	<string>https://github.com/sonhyrd/openclip/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>JbyKx5LUkYkM+ovsJ1NPDR2W+1ptfdsu6b51KBsKhWo=</string>
+	<string>TwC/Al/mC9ghwPNoGNt0nYHkgvmCcYH6lVhMIU+JPxI=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>
