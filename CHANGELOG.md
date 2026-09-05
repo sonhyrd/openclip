@@ -4,6 +4,16 @@ All notable user-facing changes, feature additions, and improvements to OpenClip
 
 ---
 
+## v1.3.2 - 2026-09-05
+
+First release published from this fork's own update feed. Same app as v1.3.1 upstream, plus the fork's Claude Code CLI provider — and, critically, an installed build now updates to **fork** releases instead of being replaced by an upstream one that has no Claude CLI provider at all.
+
+### Fork
+- **Own Sparkle feed and signing key**: `SUFeedURL` points at `sonhyrd/openclip` releases, signed with this fork's Ed25519 key.
+- **Tagged releases build themselves**: pushing a `v*` tag builds, signs and publishes the zip, dmg and appcast.
+
+---
+
 ## v1.3.1 - 2026-09-05
 
 ### Features & Improvements
