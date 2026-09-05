@@ -17,8 +17,7 @@ public struct RevealInFinderAction: Action {
     
     @MainActor
     public func isEnabled(for context: ActionContext) -> Bool {
-        // Visibility only — never stat inside a TCC-protected folder here. See `isExistingPath`.
-        return resolvePath(from: context.selection.text, probingProtectedDirectories: false) != nil
+        return resolvePath(from: context.selection.text) != nil
     }
     
     @MainActor
@@ -39,15 +38,12 @@ public struct RevealInFinderAction: Action {
         #endif
     }
     
-    /// - Parameter probingProtectedDirectories: whether a candidate inside Desktop, Documents or
-    ///   Downloads may be stat-ed. False for the visibility check that runs on every selection,
-    ///   true when the user actually invoked the action. See `isExistingPath`.
-    public func resolvePath(from text: String, probingProtectedDirectories: Bool = true) -> String? {
+    public func resolvePath(from text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         
         // Fast path 1: Check entire selection directly
-        if let directPath = checkSinglePath(trimmed, probingProtectedDirectories: probingProtectedDirectories) {
+        if let directPath = checkSinglePath(trimmed) {
             return directPath
         }
         
@@ -68,7 +64,7 @@ public struct RevealInFinderAction: Action {
             }
             
             checksPerformed += 1
-            if let resolved = checkSinglePath(cleaned, probingProtectedDirectories: probingProtectedDirectories) {
+            if let resolved = checkSinglePath(cleaned) {
                 return resolved
             }
         }
@@ -76,7 +72,7 @@ public struct RevealInFinderAction: Action {
         return nil
     }
     
-    private func checkSinglePath(_ rawPath: String, probingProtectedDirectories: Bool) -> String? {
+    private func checkSinglePath(_ rawPath: String) -> String? {
         var path = stripDelimiters(rawPath)
         guard !path.isEmpty else { return nil }
         
@@ -94,7 +90,7 @@ public struct RevealInFinderAction: Action {
         
         // Step A: Direct expansion (fastest, exact match)
         let expanded = (unescaped as NSString).expandingTildeInPath
-        if isExistingPath(expanded, probingProtectedDirectories: probingProtectedDirectories) {
+        if isExistingPath(expanded) {
             return expanded
         }
         
@@ -102,35 +98,16 @@ public struct RevealInFinderAction: Action {
         let stripped = stripLineNumbersAndPunctuation(expanded)
         let cleaned = stripDelimiters(stripped)
         let cleanedExpanded = (cleaned as NSString).expandingTildeInPath
-        if isExistingPath(cleanedExpanded, probingProtectedDirectories: probingProtectedDirectories) {
+        if isExistingPath(cleanedExpanded) {
             return cleanedExpanded
         }
         
         return nil
     }
     
-    /// macOS gates Desktop, Documents and Downloads behind a TCC consent prompt, and it fires on a
-    /// plain `fileExists` — attributed to OpenClip, not to whatever spawned the check. `isEnabled`
-    /// runs on **every selection**, so stat-ing there makes an unexplained
-    /// "OpenClip would like to access files in your Desktop folder" dialog appear the moment a
-    /// selection happens to contain such a path. A passive visibility check must never cause that.
-    ///
-    /// So the visibility pass takes a path-shaped candidate under those three folders on trust —
-    /// the action shows, nothing is touched — and `perform` does the real stat, where the prompt is
-    /// user-initiated and obviously connected to clicking "Reveal in Finder". A candidate that
-    /// turns out not to exist falls through to the action's existing "No existing file path found"
-    /// failure.
-    private func isExistingPath(_ path: String, probingProtectedDirectories: Bool) -> Bool {
+    private func isExistingPath(_ path: String) -> Bool {
         guard path.hasPrefix("/") else { return false }
-        if !probingProtectedDirectories && Self.isInProtectedDirectory(path) { return true }
         return FileManager.default.fileExists(atPath: path)
-    }
-
-    /// The three home subfolders macOS puts behind a consent prompt.
-    private static let protectedDirectories = ["Desktop", "Documents", "Downloads"]
-
-    static func isInProtectedDirectory(_ path: String, home: String = NSHomeDirectory()) -> Bool {
-        protectedDirectories.contains { path.hasPrefix(home + "/" + $0 + "/") }
     }
     
     private func stripDelimiters(_ raw: String) -> String {
