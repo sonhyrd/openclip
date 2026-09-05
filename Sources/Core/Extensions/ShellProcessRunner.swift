@@ -305,19 +305,26 @@ public enum ShellProcessRunner {
         /// Runtime budget before the watchdog kills the subprocess. Defaults to
         /// `Constants.scriptTimeout` (60 s); tests override with a short value.
         public var timeout: TimeInterval?
+        /// Working directory for the child. nil inherits OpenClip's own — which for a
+        /// Finder-launched app is `/`. A child that walks its working directory (Claude Code
+        /// indexes it at startup) will then crawl the whole disk, so callers that spawn such a
+        /// tool should hand it somewhere small and private.
+        public var currentDirectoryURL: URL?
 
         public init(
             executableURL: URL,
             arguments: [String],
             environment: [String: String] = [:],
             stdinText: String? = nil,
-            timeout: TimeInterval? = nil
+            timeout: TimeInterval? = nil,
+            currentDirectoryURL: URL? = nil
         ) {
             self.executableURL = executableURL
             self.arguments = arguments
             self.environment = environment
             self.stdinText = stdinText
             self.timeout = timeout
+            self.currentDirectoryURL = currentDirectoryURL
         }
     }
 
@@ -368,6 +375,9 @@ public enum ShellProcessRunner {
                 process.executableURL = invocation.executableURL
                 process.arguments = invocation.arguments
                 process.environment = invocation.environment
+                if let cwd = invocation.currentDirectoryURL {
+                    process.currentDirectoryURL = cwd
+                }
 
                 let stdOutPipe = Pipe()
                 process.standardOutput = stdOutPipe

@@ -50,7 +50,9 @@ public final class ClaudeCLIProvider: AIProvider {
                         // The selection goes over stdin and is never an argument, so quotes,
                         // backticks and newlines in it can't be misread as flags.
                         stdinText: AIRequestSupport.userContent(for: input),
-                        timeout: Constants.scriptTimeout
+                        timeout: Constants.scriptTimeout,
+                        // Never inherit OpenClip's cwd (`/`): the CLI walks it. See `ClaudeCLI`.
+                        currentDirectoryURL: ClaudeCLI.isolatedWorkingDirectory()
                     )
 
                     let output: ShellProcessRunner.Output
