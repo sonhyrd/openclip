@@ -28,6 +28,20 @@ public enum ActionOptionKey {
     }
 }
 
+/// Horizontal alignment of the popup bar relative to the cursor ("left" | "center" | "right").
+public enum PopupBarAlignment: String, Codable, CaseIterable, Sendable {
+    case left
+    case center
+    case right
+}
+
+/// Vertical placement mode of the popup bar relative to the cursor/selection ("auto" | "above" | "below").
+public enum PopupVerticalPosition: String, Codable, CaseIterable, Sendable {
+    case auto
+    case above
+    case below
+}
+
 public extension SettingKey where Value == [String] {
     static var actionOrder: SettingKey<[String]> { SettingKey<[String]>("action.order", defaultValue: []) }
 }
@@ -62,6 +76,9 @@ public extension SettingKey where Value == Bool {
     static var completionCopyToClipboard: SettingKey<Bool> { SettingKey<Bool>("completionCopyToClipboard", defaultValue: false) }
     /// True once the one-time migration (auto-trust existing installs) has run.
     static var extensionTrustMigrated: SettingKey<Bool> { SettingKey<Bool>("extension.trustMigrated", defaultValue: false) }
+    static var automaticallyChecksForUpdates: SettingKey<Bool> { SettingKey<Bool>("automaticallyChecksForUpdates", defaultValue: true) }
+    static var automaticallyDownloadsUpdates: SettingKey<Bool> { SettingKey<Bool>("automaticallyDownloadsUpdates", defaultValue: true) }
+    static var notifyOnUpdate: SettingKey<Bool> { SettingKey<Bool>("notifyOnUpdate", defaultValue: true) }
 }
 
 public extension SettingKey where Value == Int {
@@ -76,6 +93,8 @@ public extension SettingKey where Value == Int {
 public extension SettingKey where Value == Double {
     /// Duration in seconds the mouse must be held down to trigger the popup (0.0 = disabled).
     static var mouseHoldDuration: SettingKey<Double> { SettingKey<Double>("mouseHoldDuration", defaultValue: 0.3) }
+    /// Timestamp (seconds since 1970) until which OpenClip is temporarily paused (0.0 = not paused).
+    static var pauseUntilTimestamp: SettingKey<Double> { SettingKey<Double>("pauseUntilTimestamp", defaultValue: 0.0) }
 }
 
 public extension SettingKey where Value == Data? {
@@ -96,6 +115,10 @@ public extension SettingKey where Value == String {
     /// Popup theme ("classic"/"glass") and shared appearance ("system"/"light"/"dark").
     static var popupTheme: SettingKey<String> { SettingKey<String>("popupTheme", defaultValue: "classic") }
     static var popupThemeColor: SettingKey<String> { SettingKey<String>("popupThemeColor", defaultValue: "system") }
+    /// Popup horizontal alignment relative to cursor ("left" | "center" | "right").
+    static var popupAlignment: SettingKey<String> { SettingKey<String>("popupAlignment", defaultValue: PopupBarAlignment.left.rawValue) }
+    /// Popup vertical placement relative to cursor/selection ("auto" | "above" | "below").
+    static var popupVerticalPosition: SettingKey<String> { SettingKey<String>("popupVerticalPosition", defaultValue: PopupVerticalPosition.auto.rawValue) }
 
     /// The last version string (CFBundleShortVersionString) the app was launched on.
     /// Used to classify launch scenarios (First Install, App Update, Reinstall, Normal Launch).

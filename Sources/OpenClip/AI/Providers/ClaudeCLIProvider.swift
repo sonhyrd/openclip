@@ -56,8 +56,12 @@ public final class ClaudeCLIProvider: AIProvider {
                     let output: ShellProcessRunner.Output
                     do {
                         output = try await ShellProcessRunner.runCapturingExit(invocation)
+                    } catch is CancellationError {
+                        // The runner now kills the child on task cancellation; propagate the
+                        // cancellation as itself rather than dressing it up as a launch failure.
+                        throw CancellationError()
                     } catch {
-                        // The only two throws from the runner: the watchdog, and a failed spawn.
+                        // The remaining throws from the runner: the watchdog, and a failed spawn.
                         throw Self.launchOrTimeoutFailure(error)
                     }
 
@@ -82,15 +86,15 @@ public final class ClaudeCLIProvider: AIProvider {
                     continuation.finish(throwing: error)
                 }
             }
-            // Cancelling the popup cancels this task but does NOT kill the child: the shared
-            // executor never consults cancellation. The orphan is bounded by the 30s watchdog and
-            // writes no transcript (`--no-session-persistence`). Known and accepted.
+            // Cancelling the popup cancels this task, and the shared executor now kills the
+            // child's process group with it (upstream 1.3.0 made `ShellProcessRunner` consult task
+            // cancellation). The watchdog stays as the upper bound at `Constants.scriptTimeout`.
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    /// `runCapturingExit` throws only on the watchdog kill and on a failed spawn — a non-zero exit
-    /// comes back as a value. The watchdog's NSError is the one identity that distinguishes them,
+    /// `runCapturingExit` throws on the watchdog kill, on a failed spawn and on task cancellation
+    /// (handled by its own catch above) — a non-zero exit comes back as a value. The watchdog's NSError is the one identity that distinguishes them,
     /// so a hung child surfaces as the timeout message (with its bound stated) rather than a
     /// generic launch failure.
     private static func launchOrTimeoutFailure(_ error: Error) -> ClaudeCLI.Failure {

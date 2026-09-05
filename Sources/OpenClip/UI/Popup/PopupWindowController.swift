@@ -22,7 +22,7 @@ public class PopupWindowController {
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
     private var currentContext: SelectionContext?
-    private var currentActionContext: ActionContext?
+    var currentActionContext: ActionContext?
     private var cardAbove = false
     /// Popup display mode (actions bar ↔ search palette ↔ result card), observed by PopupView.
     public let modeStore = PopupModeStore()
@@ -69,6 +69,17 @@ public class PopupWindowController {
     /// row), for the result card header. Lifecycle mirrors `pendingActionTitle`. Internal for tests.
     var pendingActionIcon: ActionIcon? = nil
 
+    /// In-flight delivery context snapshotted before an action performs, preserved across hide()
+    /// so an asynchronous action that finishes after popup dismissal or app-switching delivers with
+    /// its original context. Internal for tests.
+    var inFlightDeliveryContext: DeliveryContext? = nil
+
+    /// Provider for the current frontmost application. Defaults to NSWorkspace.shared.frontmostApplication.
+    /// Injected for testing app-switching scenarios.
+    var frontmostApplicationProvider: @MainActor () -> NSRunningApplication? = {
+        NSWorkspace.shared.frontmostApplication
+    }
+
     /// Probes whether the frontmost app supports Paste. Injected for tests.
     private let pasteProbe: PasteAvailabilityProbing
 
@@ -101,9 +112,17 @@ public class PopupWindowController {
     /// depend on SwiftUI view teardown racing AppKit's hide().
     var activeStreamingTask: Task<Void, Never>?
 
+    /// Active loading action task reference so clicking the loading toast can cancel in-flight execution.
+    var activeLoadingTask: Task<Void, Never>?
+    private var activeLoadingID: UUID?
+
     /// When true, distance-based auto-dismiss is suppressed so the popup stays visible
     /// during the onboarding sandbox experience.
     public var isOnboardingVisible: Bool = false
+
+    /// Accumulator for trackpad scroll wheel displacement to avoid false-positive dismissals
+    /// from resting palms or finger-lift micro-scrolls.
+    private var accumulatedScrollDelta: CGFloat = 0
 
     public init(resultHandler: ActionResultHandler = DefaultActionResultHandler(),
                 pasteProbe: PasteAvailabilityProbing = PasteAvailabilityProbe(),
@@ -156,6 +175,8 @@ public class PopupWindowController {
             // task and bump the token so late chunks are dropped even before the old view unwinds.
             activeStreamingTask?.cancel()
             activeStreamingTask = nil
+            activeLoadingTask?.cancel()
+            activeLoadingTask = nil
             aiSession = UUID()
             aiSessionID = aiSession
         }
@@ -181,15 +202,21 @@ public class PopupWindowController {
         panel.horizontalAnchor = .none
         preSearchFrame = nil
 
+        let rawAlignment = settingsStore.get(SettingKey.popupAlignment)
+        let alignment = PopupBarAlignment(rawValue: rawAlignment) ?? .left
+        let rawVertical = settingsStore.get(SettingKey.popupVerticalPosition)
+        let verticalPosition = PopupVerticalPosition(rawValue: rawVertical) ?? .auto
+
         // Pre-compute card direction from real screen position
         let screen = PopupPositioner.screen(containing: context.cursorPosition) ?? NSScreen.main
         let screenBounds = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let tempFrame = PopupPositioner.calculateFrame(
-            for: context, popupSize: CGSize(width: 320, height: 50), in: screenBounds)
+            for: context, popupSize: CGSize(width: 320, height: 50), in: screenBounds, alignment: alignment, verticalPosition: verticalPosition)
         cardAbove = tempFrame.minY < screenBounds.minY + PopupMetrics.cardAboveThreshold
 
         modeStore.mode = .actions
         modeStore.searchResultsAbove = cardAbove
+        modeStore.subBarAbove = PopupPositioner.isPlacedAbove(frame: tempFrame, releasePoint: context.cursorPosition)
         // Probed before selection retrieval by the trigger sites and resolved before this frame,
         // so the bar/search gate Paste/Cut correctly on the first render. `nil` keeps them visible.
         modeStore.canPaste = pasteAvailable
@@ -249,17 +276,20 @@ public class PopupWindowController {
                 self?.usageStore.record(actionID)
             },
             onWillPerformAction: { [weak self] action in
-                self?.pendingDelivery = action.delivery
-                self?.pendingActionTitle = action.title
-                self?.pendingActionIcon = action.displayIcon(using: ActionCustomizationManager.shared)
+                guard let self else { return }
+                self.pendingDelivery = action.delivery
+                self.pendingActionTitle = action.title
+                self.pendingActionIcon = action.displayIcon(using: ActionCustomizationManager.shared)
+                self.inFlightDeliveryContext = self.deliverySnapshot(for: action)
             },
             onRunLoadingAction: { [weak self] action in
                 guard let self, let context = self.currentActionContext else { return }
                 self.runLoadingAction(action, with: context, isSecondaryClick: self.pendingClickIntent == .secondary)
             },
             onRunAI: { [weak self] actionID in
-                guard let preset = AIServiceManager.shared.preset(forActionID: actionID) else { return }
-                self?.runAIPreset(prompt: preset.prompt, title: preset.title)
+                guard let self, let preset = AIServiceManager.shared.preset(forActionID: actionID) else { return }
+                let prompt = AIServiceManager.shared.promptForPreset(preset)
+                self.runAIPreset(prompt: prompt, title: preset.title)
             },
             onClickIntent: { [weak self] in self?.pendingClickIntent ?? .primary }
         )
@@ -269,11 +299,12 @@ public class PopupWindowController {
 
         // Compute card direction from real screen position using the actual rendered panel size.
         let calculatedFrame = PopupPositioner.calculateFrame(
-            for: context, popupSize: size, in: screenBounds)
+            for: context, popupSize: size, in: screenBounds, alignment: alignment, verticalPosition: verticalPosition)
         cardAbove = calculatedFrame.minY < screenBounds.minY + PopupMetrics.cardAboveThreshold
         modeStore.searchResultsAbove = cardAbove
+        modeStore.subBarAbove = PopupPositioner.isPlacedAbove(frame: calculatedFrame, releasePoint: context.cursorPosition)
 
-        positionPanel(panel, size: size, for: context)
+        positionPanel(panel, size: size, for: context, alignment: alignment, verticalPosition: verticalPosition)
         lastPopupFrame = panel.frame
         // Placement is fixed; any subsequent content-driven width change (search palette,
         // pagination) must re-center rather than drift off the cursor.
@@ -555,13 +586,15 @@ public class PopupWindowController {
         return size
     }
 
-    private func positionPanel(_ panel: PopupPanel, size: CGSize, for context: SelectionContext) {
+    private func positionPanel(_ panel: PopupPanel, size: CGSize, for context: SelectionContext, alignment: PopupBarAlignment = .left, verticalPosition: PopupVerticalPosition = .auto) {
         let screen = PopupPositioner.screen(containing: context.cursorPosition) ?? NSScreen.main
         let screenBounds = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let frame = PopupPositioner.calculateFrame(
             for: context,
             popupSize: size,
-            in: screenBounds
+            in: screenBounds,
+            alignment: alignment,
+            verticalPosition: verticalPosition
         )
         panel.setFrame(frame, display: true)
     }
@@ -571,6 +604,9 @@ public class PopupWindowController {
         // chunk already in flight is dropped instead of re-flipping state after the resets below.
         activeStreamingTask?.cancel()
         activeStreamingTask = nil
+        activeLoadingTask?.cancel()
+        activeLoadingTask = nil
+        activeLoadingID = nil
         aiSessionID = UUID()
 
         if toastController.currentFeedback?.keepVisible == true || toastController.isLoading {
@@ -587,6 +623,7 @@ public class PopupWindowController {
         pendingDelivery = nil
         pendingActionTitle = nil
         pendingActionIcon = nil
+        accumulatedScrollDelta = 0
         isRightClickInProgress = false
         modeStore.isProcessingAI = false
         modeStore.mode = .actions
@@ -607,6 +644,22 @@ public class PopupWindowController {
         isMenuTracking = false
         PopupHoverState.shared.location = nil
         SubBarHoverState.shared.location = nil
+    }
+
+    /// Cancels any in-flight background tasks (loading actions and AI streaming) and hides the toast.
+    @MainActor
+    public func cancelActiveTasks() {
+        if activeLoadingTask != nil || activeStreamingTask != nil {
+            Log.presentation.info("Cancelling active in-flight task(s) via loading toast")
+        }
+        activeLoadingTask?.cancel()
+        activeLoadingTask = nil
+        activeLoadingID = nil
+        activeStreamingTask?.cancel()
+        activeStreamingTask = nil
+        inFlightDeliveryContext = nil
+        modeStore.isProcessingAI = false
+        toastController.hide()
     }
     
     private func setupMonitors() {
@@ -631,6 +684,8 @@ public class PopupWindowController {
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidBeginTracking), name: NSMenu.didBeginTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidEndTracking), name: NSMenu.didEndTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidDeactivate), name: NSApplication.didResignActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(workspaceDidActivateApp(_:)), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(workspaceActiveSpaceDidChange), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
     }
     
     @objc private func menuDidBeginTracking() {
@@ -651,6 +706,7 @@ public class PopupWindowController {
             localEventMonitor = nil
         }
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     func handleEvent(_ event: NSEvent) {
@@ -667,6 +723,9 @@ public class PopupWindowController {
             let distanceDismissActive = modeStore.mode != .search && modeStore.mode != .content && !modeStore.isProcessingAI && !isOnboardingVisible
             if distanceDismissActive, let panel = panel {
                 let frame = panel.frame
+                let screenBounds = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+                let dismissalLimit = PopupMetrics.dismissalDistance(for: screenBounds)
+
                 let dxMain = max(0, max(frame.minX - cursorLoc.x, cursorLoc.x - frame.maxX))
                 let dyMain = max(0, max(frame.minY - cursorLoc.y, cursorLoc.y - frame.maxY))
                 let distMain = hypot(dxMain, dyMain)
@@ -674,14 +733,25 @@ public class PopupWindowController {
                 let dist: CGFloat
                 if subBarController.isShowing {
                     let subFrame = subBarController.panelFrame
-                    let dxSub = max(0, max(subFrame.minX - cursorLoc.x, cursorLoc.x - subFrame.maxX))
-                    let dySub = max(0, max(subFrame.minY - cursorLoc.y, cursorLoc.y - subFrame.maxY))
-                    dist = min(distMain, hypot(dxSub, dySub))
+                    // Safe hover pathway / corridor between main panel and sub-bar
+                    let corridorMinX = min(frame.minX, subFrame.minX) - 16.0
+                    let corridorMaxX = max(frame.maxX, subFrame.maxX) + 16.0
+                    let corridorMinY = min(frame.minY, subFrame.minY) - 16.0
+                    let corridorMaxY = max(frame.maxY, subFrame.maxY) + 16.0
+                    let corridorRect = CGRect(x: corridorMinX, y: corridorMinY, width: corridorMaxX - corridorMinX, height: corridorMaxY - corridorMinY)
+
+                    if corridorRect.contains(cursorLoc) {
+                        dist = 0.0
+                    } else {
+                        let dxSub = max(0, max(subFrame.minX - cursorLoc.x, cursorLoc.x - subFrame.maxX))
+                        let dySub = max(0, max(subFrame.minY - cursorLoc.y, cursorLoc.y - subFrame.maxY))
+                        dist = min(distMain, hypot(dxSub, dySub))
+                    }
                 } else {
                     dist = distMain
                 }
 
-                if dist > PopupMetrics.popupDismissalDistance {
+                if dist > dismissalLimit {
                     hide()
                 }
             }
@@ -734,7 +804,22 @@ public class PopupWindowController {
             let dominated = event.phase == .mayBegin || event.phase == .cancelled
             let zeroScroll = event.scrollingDeltaX == 0 && event.scrollingDeltaY == 0
             if dominated && zeroScroll { break }
-            hide()
+
+            let rawDelta = hypot(event.scrollingDeltaX, event.scrollingDeltaY)
+            let delta = event.hasPreciseScrollingDeltas ? rawDelta : (rawDelta > 0 || event.deltaY != 0 ? 12.0 : 0.0)
+
+            if event.phase == .began {
+                accumulatedScrollDelta = delta
+            } else if event.phase == .ended || event.phase == .cancelled {
+                accumulatedScrollDelta = 0
+            } else {
+                accumulatedScrollDelta += delta
+            }
+
+            if accumulatedScrollDelta >= 12.0 {
+                accumulatedScrollDelta = 0
+                hide()
+            }
         case .keyDown:
             // Actions mode: any keystroke (including Escape) dismisses the popup; the panel is
             // never key here, so keys land in the source app and are merely observed.
@@ -897,6 +982,23 @@ public class PopupWindowController {
         }
     }
 
+    @objc private func workspaceDidActivateApp(_ notification: Notification) {
+        guard let app = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+            ?? NSWorkspace.shared.frontmostApplication else { return }
+        if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+        if let sourceBundleID = currentContext?.sourceApp.bundleIdentifier,
+           app.bundleIdentifier == sourceBundleID {
+            return
+        }
+        if !isRightClickInProgress {
+            hide()
+        }
+    }
+
+    @objc private func workspaceActiveSpaceDidChange() {
+        hide()
+    }
+
     // MARK: - Sub-Bar Presentation
 
     private func convertHoverFrameToScreen(_ hoverFrame: CGRect) -> NSRect {
@@ -948,7 +1050,14 @@ public class PopupWindowController {
         let effectiveTheme = themeCategory == .glass ? "glass" : PopupThemeModel.classicToken(appearance: appearance, systemIsDark: systemIsDark)
         let effectiveColorScheme = PopupThemeModel.effectiveScheme(appearance: appearance, systemIsDark: systemIsDark)
 
-        subBarController.show(
+        let mainBarAbove: Bool
+        if let panel, let currentContext {
+            mainBarAbove = PopupPositioner.isPlacedAbove(frame: panel.frame, releasePoint: currentContext.cursorPosition)
+        } else {
+            mainBarAbove = modeStore.searchResultsAbove
+        }
+
+        let actuallyAbove = subBarController.show(
             for: action,
             parentIndex: index,
             subActions: children,
@@ -956,6 +1065,7 @@ public class PopupWindowController {
             mainBarScreenFrame: panel?.frame,
             isPinned: isPinned,
             searchResultsAbove: modeStore.searchResultsAbove,
+            mainBarAbove: mainBarAbove,
             effectiveTheme: effectiveTheme,
             effectiveColorScheme: effectiveColorScheme,
             scale: scale,
@@ -969,11 +1079,12 @@ public class PopupWindowController {
             },
             onRunAI: { [weak self] actionID in
                 self?.usageStore.record(actionID)
-                guard let preset = AIServiceManager.shared.preset(forActionID: actionID) else { return }
-                self?.subBarController.hide()
-                self?.modeStore.isSubBarActive = false
-                self?.modeStore.activeSubGroupID = nil
-                self?.runAIPreset(prompt: preset.prompt, title: preset.title)
+                guard let self, let preset = AIServiceManager.shared.preset(forActionID: actionID) else { return }
+                self.subBarController.hide()
+                self.modeStore.isSubBarActive = false
+                self.modeStore.activeSubGroupID = nil
+                let prompt = AIServiceManager.shared.promptForPreset(preset)
+                self.runAIPreset(prompt: prompt, title: preset.title)
             },
             onRunLoadingAction: { [weak self] action in
                 guard let self, let context = self.currentActionContext else { return }
@@ -983,15 +1094,18 @@ public class PopupWindowController {
                 self.runLoadingAction(action, with: context, isSecondaryClick: self.pendingClickIntent == .secondary)
             },
             onWillPerformAction: { [weak self] action in
-                self?.pendingDelivery = action.delivery
-                self?.pendingActionTitle = action.title
-                self?.pendingActionIcon = action.displayIcon(using: ActionCustomizationManager.shared)
+                guard let self else { return }
+                self.pendingDelivery = action.delivery
+                self.pendingActionTitle = action.title
+                self.pendingActionIcon = action.displayIcon(using: ActionCustomizationManager.shared)
+                self.inFlightDeliveryContext = self.deliverySnapshot(for: action)
             },
             onActionPerformed: { [weak self] actionID in
                 self?.usageStore.record(actionID)
             },
             onClickIntent: { [weak self] in self?.pendingClickIntent ?? .primary }
         )
+        modeStore.subBarAbove = actuallyAbove
     }
 
     func runAIPreset(prompt: String, title: String) {
@@ -1009,7 +1123,9 @@ public class PopupWindowController {
         hide()
         let session = aiSessionID
 
-        toastController.showLoading(message: String(localized: "Generating…"), anchorFrame: anchorFrame)
+        toastController.showLoading(message: String(localized: "Generating…"), anchorFrame: anchorFrame) { [weak self] in
+            self?.cancelActiveTasks()
+        }
 
         let task = Task { @MainActor in
             self.modeStore.isProcessingAI = true
@@ -1077,6 +1193,9 @@ public class PopupWindowController {
                     }
                     self.showResultCard(text: finalResponse, isError: false, title: title, isStreaming: false, session: session)
                 }
+            } catch is CancellationError {
+                Log.ai.info("AI streaming cancelled")
+                self.toastController.hide()
             } catch {
                 guard !Task.isCancelled, session == self.aiSessionID else {
                     self.toastController.hide()
@@ -1132,17 +1251,34 @@ public class PopupWindowController {
     /// Snapshots the delivery inputs from the current session state. Called on the main actor,
     /// synchronously, before any dismissal or await, so the decision never depends on live state
     /// read after `hide()` or after the probe suspension.
-    private func deliverySnapshot() -> DeliveryContext {
-        DeliveryContext(
+    func deliverySnapshot(for action: (any Action)? = nil, clickIntent: ActionResultDelivery.ClickIntent? = nil) -> DeliveryContext {
+        let intent = clickIntent ?? pendingClickIntent
+        let actionDelivery = action?.delivery ?? pendingDelivery
+        let title = action?.title ?? pendingActionTitle
+        let icon = action?.displayIcon(using: ActionCustomizationManager.shared) ?? pendingActionIcon
+        let targetApp = previousFrontmostApp ?? (frontmostApplicationProvider()?.bundleIdentifier != Bundle.main.bundleIdentifier ? frontmostApplicationProvider() : previousFrontmostApp)
+        return DeliveryContext(
             policy: currentActionContext?.selection.appPolicy ?? .default,
-            clickIntent: pendingClickIntent,
-            delivery: pendingDelivery,
-            application: NSWorkspace.shared.frontmostApplication,
-            preference: preference(for: pendingClickIntent),
-            actionTitle: pendingActionTitle,
-            actionIcon: pendingActionIcon,
+            clickIntent: intent,
+            delivery: actionDelivery,
+            application: targetApp,
+            preference: preference(for: intent),
+            actionTitle: title,
+            actionIcon: icon,
             selection: currentActionContext?.selection
         )
+    }
+
+    /// Checks if the target application is still the active frontmost application.
+    /// If the user switched to a different application while an action was executing asynchronously,
+    /// automated paste must not blindly post into the new foreground window.
+    private func isTargetApplicationActive(_ targetApp: NSRunningApplication?) -> Bool {
+        guard let targetApp else { return true }
+        guard let frontmost = frontmostApplicationProvider() else { return true }
+        if frontmost.bundleIdentifier == Bundle.main.bundleIdentifier {
+            return true
+        }
+        return frontmost.processIdentifier == targetApp.processIdentifier
     }
 
     /// Routes a performed result into the tree-walk, snapshotting the delivery inputs first.
@@ -1153,15 +1289,16 @@ public class PopupWindowController {
     /// delivery is single-use per perform: the snapshot is its only consumer, so it is cleared
     /// immediately after — a later `onResult` paste (completion buttons route here directly) must
     /// never reuse a prior action's declaration. Internal for tests.
-    func deliverResult(_ result: ActionResult) {
-        let delivery = deliverySnapshot()
+    func deliverResult(_ result: ActionResult, delivery: DeliveryContext? = nil) {
+        let resolvedDelivery = delivery ?? inFlightDeliveryContext ?? deliverySnapshot()
+        inFlightDeliveryContext = nil
         pendingDelivery = nil
         pendingActionTitle = nil
         pendingActionIcon = nil
-        if shouldDismiss(result, delivery: delivery) {
+        if shouldDismiss(result, delivery: resolvedDelivery) {
             hide()
         }
-        handleActionResult(result, delivery: delivery, suppressDeliveryToast: result.containsToast)
+        handleActionResult(result, delivery: resolvedDelivery, suppressDeliveryToast: result.containsToast)
     }
 
     /// Walks an ActionResult produced by a perform, rendering presentation results in the popup and
@@ -1247,9 +1384,10 @@ public class PopupWindowController {
         // Otherwise probe the target app and treat unknown availability as cannot-paste — the safe
         // default: never paste blindly when we cannot confirm the target supports it. The target is
         // the snapshotted app captured before hide(), never frontmost state read after suspension.
+        let isTargetActive = isTargetApplicationActive(delivery.application)
         let canPaste: Bool
-        if !couldPaste {
-            canPaste = false // unused: `resolve` only consults it for a selected `.paste`
+        if !couldPaste || !isTargetActive {
+            canPaste = false // unused: `resolve` only consults it for a selected `.paste`, or target app inactive
         } else if (delivery.clickIntent == .secondary && !(declaredSecondaryIsPaste || textPrefersPaste)) || !PasteAvailability.needsProbe(policy: delivery.policy) {
             canPaste = PasteAvailability.effective(policy: delivery.policy, probe: nil) ?? false
         } else {
@@ -1319,16 +1457,18 @@ public class PopupWindowController {
         // `deliverResult` (e.g. a completion-paste from a preview card) must never reuse this
         // perform's declaration.
         let preference = preference(for: clickIntent)
+        let targetApp = previousFrontmostApp ?? (frontmostApplicationProvider()?.bundleIdentifier != Bundle.main.bundleIdentifier ? frontmostApplicationProvider() : previousFrontmostApp)
         let delivery = DeliveryContext(
             policy: context.selection.appPolicy,
             clickIntent: clickIntent,
             delivery: action.delivery,
-            application: NSWorkspace.shared.frontmostApplication,
+            application: targetApp,
             preference: preference,
             actionTitle: action.title,
             actionIcon: action.displayIcon(using: ActionCustomizationManager.shared),
             selection: context.selection
         )
+        inFlightDeliveryContext = delivery
         usageStore.record(action.id)
         let match = action.matchInfo(for: context)
         let performContext = ActionContext(
@@ -1344,9 +1484,11 @@ public class PopupWindowController {
                     self.hide()
                 }
                 self.handleActionResult(result, delivery: delivery, suppressDeliveryToast: result.containsToast)
+                self.inFlightDeliveryContext = nil
             } catch {
                 Log.presentation.error("Action failed (id \(action.id, privacy: .public)): \(error.localizedDescription)")
                 self.handleActionResult(.toast(StatusFeedback(error: error)))
+                self.inFlightDeliveryContext = nil
             }
         }
     }
@@ -1363,16 +1505,18 @@ public class PopupWindowController {
         // perform path's only consumer. Unlike the bar/search path, no `onWillPerformAction`
         // precedes it, so `pendingDelivery`/`pendingActionTitle` must stay untouched: a later
         // `deliverResult` must never reuse this perform's declaration.
+        let targetApp = previousFrontmostApp ?? (frontmostApplicationProvider()?.bundleIdentifier != Bundle.main.bundleIdentifier ? frontmostApplicationProvider() : previousFrontmostApp)
         let delivery = DeliveryContext(
             policy: context.selection.appPolicy,
             clickIntent: clickIntent,
             delivery: action.delivery,
-            application: NSWorkspace.shared.frontmostApplication,
+            application: targetApp,
             preference: preference(for: clickIntent),
             actionTitle: action.title,
             actionIcon: action.displayIcon(using: ActionCustomizationManager.shared),
             selection: context.selection
         )
+        inFlightDeliveryContext = delivery
         usageStore.record(action.id)
         let match = action.matchInfo(for: context)
         let performContext = ActionContext(
@@ -1385,16 +1529,38 @@ public class PopupWindowController {
         let anchorFrame = panel?.frame ?? lastPopupFrame
         hide()
         let message = action.chrome.loadingMessage ?? String(localized: "Opening \(action.title)…")
-        toastController.showLoading(message: message, anchorFrame: anchorFrame)
-        Task { @MainActor in
+        toastController.showLoading(message: message, anchorFrame: anchorFrame) { [weak self] in
+            self?.cancelActiveTasks()
+        }
+        let runID = UUID()
+        activeLoadingID = runID
+        let loadingTask = Task { @MainActor in
+            defer {
+                if self.activeLoadingID == runID {
+                    self.activeLoadingTask = nil
+                    self.activeLoadingID = nil
+                }
+            }
             do {
                 let result = try await action.perform(performContext)
-                await settleLoadingResult(result, delivery: delivery, suppressDeliveryToast: result.containsToast)
+                guard !Task.isCancelled else {
+                    self.toastController.hide()
+                    return
+                }
+                await self.settleLoadingResult(result, delivery: delivery, suppressDeliveryToast: result.containsToast)
+            } catch is CancellationError {
+                Log.presentation.info("Loading action cancelled (id \(action.id, privacy: .public))")
+                self.toastController.hide()
             } catch {
+                guard !Task.isCancelled else {
+                    self.toastController.hide()
+                    return
+                }
                 Log.presentation.error("Action failed (id \(action.id, privacy: .public)): \(error.localizedDescription)")
-                await settleLoadingResult(.toast(StatusFeedback(error: error)), delivery: delivery)
+                await self.settleLoadingResult(.toast(StatusFeedback(error: error)), delivery: delivery)
             }
         }
+        activeLoadingTask = loadingTask
     }
 
     /// Resolves a loading action's result into the toast: `.toast` swaps to that status,

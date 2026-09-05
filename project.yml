@@ -2,7 +2,7 @@ name: OpenClip
 options:
   bundleIdPrefix: com.openclip
   developmentLanguage: en
-  knownRegions: [en, Base, zh-Hans]
+  knownRegions: [en, Base, zh-Hans, zh-Hant, fr, ja]
 targets:
   Core:
     type: framework
@@ -34,14 +34,18 @@ targets:
         SUPublicEDKey: JbyKx5LUkYkM+ovsJ1NPDR2W+1ptfdsu6b51KBsKhWo=
         SUScheduledCheckInterval: 86400
         SUEnableAutomaticChecks: true
+        SUAutomaticallyUpdate: true
         CFBundleLocalizations:
           - en
           - zh-Hans
+          - zh-Hant
+          - fr
+          - ja
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        MARKETING_VERSION: "1.2.1"
-        CURRENT_PROJECT_VERSION: "6"
+        MARKETING_VERSION: "1.3.0"
+        CURRENT_PROJECT_VERSION: "7"
         INFOPLIST_KEY_CFBundleShortVersionString: $(MARKETING_VERSION)
         INFOPLIST_KEY_CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

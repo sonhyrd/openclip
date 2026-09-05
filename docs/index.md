@@ -55,7 +55,7 @@ Welcome to the **OpenClip** technical documentation hub. OpenClip is a lightweig
 - [ADR 0001 — Isolate the Claude Code CLI invocation](adr/0001-isolate-the-claude-code-cli-invocation.md) — Why the Claude Code (local CLI) provider exists, its isolation flag set flag by flag, what those flags do *not* buy, the dated model pin, the divergences from upstream, and the measurements behind each.
 
 ### Developer Guide
-- [AGENTS.md — Authoring & Packaging Extensions](developer-guide/AGENTS.md) — **Start here.** Self-contained guide: manifest schema, all action kinds, options, requirements, groups, and the result surface.
+- [AGENTS.md — Authoring & Packaging Extensions](../Extensions/AGENTS.md) — **Start here.** Self-contained guide: manifest schema, all action kinds, options, requirements, groups, and the result surface.
 - [Extending OpenClip Overview](developer-guide/overview.md) — Extension architecture and custom action integration.
 - [Extension Package Format](developer-guide/package-format.md) — `.openclipext` bundle structure, `manifest.json` schema, and options definitions.
 - [Standalone Snippet Parsing](developer-guide/snippets.md) — Pure header parsing via `OpenClipSnippetParser`.
