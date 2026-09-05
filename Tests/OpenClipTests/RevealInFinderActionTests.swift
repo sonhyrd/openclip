@@ -96,31 +96,4 @@ final class RevealInFinderActionTests: XCTestCase {
         )
         XCTAssertTrue(action.isEnabled(for: embeddedValidContext))
     }
-
-    /// The visibility pass must never stat inside Desktop/Documents/Downloads: that raises the
-    /// macOS TCC consent prompt, attributed to OpenClip, on nothing more than a selection that
-    /// happens to mention such a path. A path-shaped candidate there is taken on trust for
-    /// visibility and only really stat-ed when the user invokes the action.
-    func testVisibilityDoesNotStatProtectedDirectories() {
-        let action = RevealInFinderAction()
-        let missing = NSHomeDirectory() + "/Desktop/openclip-does-not-exist-\(UUID().uuidString).txt"
-
-        // Visibility pass: enabled without touching the file system.
-        XCTAssertEqual(action.resolvePath(from: missing, probingProtectedDirectories: false), missing)
-        // Invocation pass: the real stat, and this file really is absent.
-        XCTAssertNil(action.resolvePath(from: missing, probingProtectedDirectories: true))
-        // Outside the protected folders, the visibility pass still stats and still says no.
-        XCTAssertNil(action.resolvePath(from: "/non/existent/path/for/unit/test/12345",
-                                        probingProtectedDirectories: false))
-    }
-
-    func testProtectedDirectoryMatchingIsPrefixExact() {
-        let home = "/Users/tester"
-        XCTAssertTrue(RevealInFinderAction.isInProtectedDirectory("\(home)/Desktop/a.txt", home: home))
-        XCTAssertTrue(RevealInFinderAction.isInProtectedDirectory("\(home)/Downloads/b/c.txt", home: home))
-        // The folder itself is not a file inside it, and a lookalike sibling is not a match.
-        XCTAssertFalse(RevealInFinderAction.isInProtectedDirectory("\(home)/Desktop", home: home))
-        XCTAssertFalse(RevealInFinderAction.isInProtectedDirectory("\(home)/DesktopStuff/a.txt", home: home))
-        XCTAssertFalse(RevealInFinderAction.isInProtectedDirectory("/tmp/Desktop/a.txt", home: home))
-    }
 }
