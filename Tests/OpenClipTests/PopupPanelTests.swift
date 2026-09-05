@@ -723,14 +723,23 @@ final class PopupPanelTests: XCTestCase {
         let buttonLocalX: CGFloat = 250
         let buttonWidth: CGFloat = 34
         let buttonLocalFrame = CGRect(x: buttonLocalX, y: 0, width: buttonWidth, height: 29)
-        let expectedButtonScreenMidX = initialBarFrame.minX + buttonLocalFrame.midX
+        let buttonScreenMidX = initialBarFrame.minX + buttonLocalFrame.midX
+        // The palette centers on the button only while that fits: `searchPaletteMidX` also caps the
+        // palette's right edge at the bar's, then clamps to the screen. Asserting raw centering
+        // assumes a display wide enough for the cap never to bite — false on a CI runner, where this
+        // failed 529 vs 746 on upstream's own tree. Assert the rule, not one screen's outcome.
+        let expectedButtonScreenMidX = PopupPositioner.searchPaletteMidX(
+            buttonScreenMidX: buttonScreenMidX,
+            barMaxX: initialBarFrame.maxX,
+            screenBounds: screen.visibleFrame
+        )
 
         controller.enterSearch(buttonLocalFrame: buttonLocalFrame)
         waitForSearchResize(panel, barHeight: initialBarFrame.height)
 
         let searchFrame = panel.frame
         XCTAssertEqual(searchFrame.midX, expectedButtonScreenMidX, accuracy: 2.0,
-                       "Search palette should be centered horizontally on the clicked button")
+                       "Search palette should follow searchPaletteMidX for the clicked button")
 
         controller.exitSearch()
         waitForSearchCollapse(panel, barHeight: initialBarFrame.height)
