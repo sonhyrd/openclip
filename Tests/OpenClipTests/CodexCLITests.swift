@@ -41,10 +41,11 @@ extension CodexCLITests {
     private static let binary = "/Users/someone/.local/share/mise/installs/node/24/bin/codex"
 
     /// The list is asserted as a LITERAL, never iterated, so a key cannot be dropped quietly. These
-    /// are the names the native codex binary references; `OPENAI_BASE_URL` is not among them.
+    /// are the names the native codex binary references, `OPENAI_BASE_URL` included (ADR 0002 §4).
     func testEveryRebillingVariableIsRemovedAndCodexHomeSurvives() {
         XCTAssertEqual(CodexCLI.strippedEnvironmentKeys, [
             "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
             "CODEX_API_KEY",
             "CODEX_ACCESS_TOKEN",
             "CODEX_AUTH",

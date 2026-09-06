@@ -9,7 +9,8 @@ Sources/
 │   ├── Core.swift                            # Module exports
 │   ├── Log.swift                             # Single logging surface: Log enum, LogChannel, LogSink protocol, LogLevel, LogMessage (see docs/logging.md)
 │   ├── AI/                                   # Pure AI-provider domain (no process launch, no logging)
-│   │   └── ClaudeCLI.swift                   # Isolated `claude` argument list, JSON envelope, failure taxonomy, binary-resolution pure parts
+│   │   ├── ClaudeCLI.swift                   # Isolated `claude` argument list, JSON envelope, failure taxonomy, model table, binary-resolution pure parts
+│   │   └── CodexCLI.swift                    # Isolated `codex` argument list, JSONL classification, catalog decoding, failure taxonomy
 │   ├── Actions/
 │   │   ├── Action.swift                      # Action protocol
 │   │   ├── ActionChrome.swift                # UI metadata policy enum
@@ -118,10 +119,11 @@ Sources/
     │   ├── AIProvider.swift                  # AIProvider protocol & prompt formatting
     │   ├── AIServiceManager.swift            # cloudAPIKey is SecretStore-backed (@Published), other prefs via @AppStorage
     │   ├── AIToolsAction.swift               # AI Tools group launcher action
-    │   └── Providers/                        # Apple Intelligence, Cloud, Ollama, BrowserRedirect, Claude CLI
+    │   └── Providers/                        # Apple Intelligence, Cloud, Ollama, BrowserRedirect, Claude CLI, Codex CLI
     │       ├── AppleIntelligenceProvider.swift # On-device Apple Intelligence runner
     │       ├── BrowserRedirectProvider.swift   # Browser search redirect runner
     │       ├── ClaudeCLIProvider.swift      # Runs a preset on the user's local `claude` binary (subscription, no API key)
+    │       ├── CodexCLIProvider.swift       # Runs a preset on the user's local `codex` binary (subscription, no API key)
     │       ├── CloudAPIProvider.swift        # OpenAI-compatible / Anthropic / Gemini / DeepSeek / Groq cloud chat
     │       ├── CloudAPIProviderDTOs.swift    # Codable chat request/response payloads for cloud APIs
     │       └── OllamaProvider.swift          # Local Ollama runner

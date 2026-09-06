@@ -67,10 +67,15 @@ Stated plainly, so this record does not over-claim:
 ## 4. Environment
 
 Stripped (`CodexCLI.strippedEnvironmentKeys`, asserted as a literal): `OPENAI_API_KEY`,
-`CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_AUTH`, `CODEX_URL` — the names the native codex
-binary references (read out of it with `strings`; **it never references `OPENAI_BASE_URL`**, so
-that is not listed). `CODEX_HOME` is **kept**: the subscription login lives there, and stripping it
-would log the user out. PATH is prefixed the way ADR 0001 does it.
+`OPENAI_BASE_URL`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_AUTH`, `CODEX_URL` — the names
+the native codex binary references, read out of it with `strings`. **Amended 2026-09-06 in the
+#26 review**: this section first said the binary never references `OPENAI_BASE_URL`; it does —
+one string in `vendor/aarch64-apple-darwin/bin/codex` (codex-cli 0.153.4), beside
+`api.openai.com` and `OPENAI_API_KEY` in the network-proxy credential-broker region. Whether
+`exec` reads it for the model client is unproven either way; it is stripped because the cost of a
+wrong guess is the user's selected text going to an endpoint they did not choose, the same
+argument ADR 0001 makes for `ANTHROPIC_BASE_URL`. `CODEX_HOME` is **kept**: the subscription login
+lives there, and stripping it would log the user out. PATH is prefixed the way ADR 0001 does it.
 
 ## 5. Measurements — codex-cli 0.153.4, 2026-09-06, offline
 

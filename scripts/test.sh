@@ -40,6 +40,7 @@ CORE_TEST_FLAGS=(
     -only-testing:OpenClipTests/ExtensionPackageHashResolverTests
     -only-testing:OpenClipTests/ExtensionUpdatePlannerTests
     -only-testing:OpenClipTests/ClaudeCLITests
+    -only-testing:OpenClipTests/CodexCLITests
 )
 
 run_xcodebuild() {

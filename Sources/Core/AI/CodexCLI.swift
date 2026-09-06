@@ -132,10 +132,14 @@ extension CodexCLI {
 extension CodexCLI {
     /// Variables removed from the child, for one reason: each can redirect or re-bill an
     /// invocation this provider promises runs on *the user's own ChatGPT subscription*. These are
-    /// the names the installed native binary references; `OPENAI_BASE_URL` is not among them and
-    /// so is not listed. `CODEX_HOME` is deliberately kept: the subscription login lives there.
+    /// the names the installed native binary references. `OPENAI_BASE_URL` is among them — one
+    /// string, beside `api.openai.com` and `OPENAI_API_KEY`; whether `exec` reads it is unproven
+    /// either way, and it is stripped because the cost of a wrong guess is a redirect of the
+    /// user's selected text (ADR 0002 §4). `CODEX_HOME` is deliberately kept: the subscription
+    /// login lives there.
     public static let strippedEnvironmentKeys = [
         "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
         "CODEX_API_KEY",
         "CODEX_ACCESS_TOKEN",
         "CODEX_AUTH",
