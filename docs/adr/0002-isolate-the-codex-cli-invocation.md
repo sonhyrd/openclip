@@ -112,5 +112,6 @@ not a pattern: it would match a login shell or a login hook.
 ## 7. Carried over from ADR 0001 unchanged
 
 One shot, not streaming (the JSONL is read after exit); the shared executor with the shared
-watchdog and process-group kill; the resolution cache on the manager, never persisted; the empty
+watchdog and process-group kill — the orphan bound: a hung codex dies at the watchdog, and a
+cancelled popup kills the child with it; the resolution cache on the manager, never persisted; the empty
 private cwd; the keyed rules-in-prompt placement.

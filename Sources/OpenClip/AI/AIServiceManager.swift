@@ -107,9 +107,12 @@ public final class AIServiceManager: ObservableObject {
     /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves.
     @discardableResult
     public func redetectClaudeCLI() async throws -> String {
-        let (path, detail) = await Self.detectBinary(named: ClaudeCLI.binaryName, onDisk: ClaudeCLI.resolveOnDisk())
+        let (path, detail) = try await Self.detectBinary(
+            named: ClaudeCLI.binaryName,
+            notFound: String(localized: "claude not found — install Claude Code and run `claude login`")
+        )
         claudeBinaryPath = path
-        claudeResolutionDetail = detail ?? String(localized: "claude not found — install Claude Code and run `claude login`")
+        claudeResolutionDetail = detail
         guard let path else {
             Log.ai.error("Claude CLI not found via login shell or known install directories")
             throw ClaudeCLI.Failure.notFound
@@ -144,9 +147,12 @@ public final class AIServiceManager: ObservableObject {
 
     @discardableResult
     public func redetectCodexCLI() async throws -> String {
-        let (path, detail) = await Self.detectBinary(named: CodexCLI.binaryName, onDisk: CodexCLI.resolveOnDisk())
+        let (path, detail) = try await Self.detectBinary(
+            named: CodexCLI.binaryName,
+            notFound: String(localized: "codex not found — install Codex and run `codex login`")
+        )
         codexBinaryPath = path
-        codexResolutionDetail = detail ?? String(localized: "codex not found — install Codex and run `codex login`")
+        codexResolutionDetail = detail
         guard let path else {
             Log.ai.error("Codex CLI not found via login shell or known install directories")
             throw CodexCLI.Failure.notFound
@@ -182,15 +188,17 @@ public final class AIServiceManager: ObservableObject {
 
     /// Login shell first, then the known install directories. Nonisolated: it only spawns a
     /// subprocess and reads the filesystem; the caller lands both values back on the main actor.
-    /// Returns nil detail when nothing was found, so each caller supplies its own not-found copy.
-    private nonisolated static func detectBinary(named binaryName: String, onDisk: String?) async -> (path: String?, detail: String?) {
+    /// - Throws: `CancellationError` when the login shell was cut short — a Provider Settings
+    ///   branch that left the screen mid-resolution must not record "not found" as the verdict.
+    private nonisolated static func detectBinary(named binaryName: String, notFound: String) async throws -> (path: String?, detail: String) {
         if let path = await loginShellPath(of: binaryName) {
             return (path, String(localized: "Found via login shell: \(path)"))
         }
-        if let path = onDisk {
+        try Task.checkCancellation()
+        if let path = ClaudeCLI.resolveOnDisk(binaryName: binaryName) {
             return (path, String(localized: "Found on disk: \(path)"))
         }
-        return (nil, nil)
+        return (nil, notFound)
     }
 
     /// `/bin/zsh -l -c "command -v <binary>"` — a **login** shell, because a GUI app launched from

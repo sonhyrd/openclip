@@ -21,11 +21,6 @@ public enum CodexCLI {
     /// notice, and the top tier is the wrong default for a one-shot text transform.
     public static let defaultModel = "gpt-5.5"
 
-    /// A literal, not a setting. A transform is one shot over selected text; the deliberation
-    /// meant for coding tasks is not wanted here. It is in the asserted array, so a change is
-    /// visible.
-    public static let reasoningEffort = "low"
-
     /// The full argument list, in order. Every element is load-bearing and `CodexCLITests` asserts
     /// this array exactly; dropping one is an argument to be made against ADR 0002, not a
     /// simplification.
@@ -42,7 +37,9 @@ public enum CodexCLI {
     ///   it always carries is confined to reading an empty private folder. This is the nearest
     ///   thing to Claude's `--tools ""`, and it is a bound, not a removal.
     /// - `--color never`, `--json`: machine-readable JSONL on stdout.
-    /// - `-m <wire id>`, `-c model_reasoning_effort="low"`: both visible in the array.
+    /// - `-m <wire id>`, `-c model_reasoning_effort="low"`: both visible in the array. The effort
+    ///   is a literal, not a setting: a transform is one shot over selected text, and the
+    ///   deliberation meant for coding tasks is not wanted here.
     /// - `-c mcp_servers={}`: states the no-MCP invariant in the argument list and fails closed
     ///   if `--ignore-user-config` ever stops covering it (Claude's `--strict-mcp-config`).
     ///   Measured: accepted, and a wrong type is rejected at config load.
@@ -65,7 +62,7 @@ public enum CodexCLI {
             "--color", "never",
             "-C", workingDirectory,
             "-m", model,
-            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
+            "-c", "model_reasoning_effort=\"low\"",
             "-c", "mcp_servers={}",
             "--json",
             prompt,
@@ -88,16 +85,9 @@ public enum CodexCLI {
 // MARK: - The catalog
 
 extension CodexCLI {
-    /// One catalog entry: what the human sees, and what goes over `-m`.
-    public struct Model: Sendable, Equatable, Hashable {
-        public let displayName: String
-        public let wireID: String
-
-        public init(displayName: String, wireID: String) {
-            self.displayName = displayName
-            self.wireID = wireID
-        }
-    }
+    /// One catalog entry: what the human sees, and what goes over `-m`. The same shape as the
+    /// Claude table's entry, on purpose — the two pickers read the same way.
+    public typealias Model = ClaudeCLI.Model
 
     private struct Catalog: Decodable {
         struct Entry: Decodable {
@@ -165,16 +155,6 @@ extension CodexCLI {
             home: home
         )
     }
-
-    /// The candidate paths to test when the login shell yields nothing.
-    public static func diskCandidatePaths(home: String = NSHomeDirectory()) -> [String] {
-        ClaudeCLI.diskCandidatePaths(binaryName: binaryName, home: home)
-    }
-
-    /// The first usable candidate from `diskCandidatePaths`, or nil.
-    public static func resolveOnDisk(home: String = NSHomeDirectory(), fileManager: FileManager = .default) -> String? {
-        ClaudeCLI.resolveOnDisk(binaryName: binaryName, home: home, fileManager: fileManager)
-    }
 }
 
 // MARK: - Failure taxonomy
@@ -203,12 +183,12 @@ extension CodexCLI {
             case .timedOut(let seconds):
                 return String(localized: "Codex did not respond within \(seconds) seconds. Try again, or try a shorter selection.")
             case .exited(let status, let stderr):
-                guard let detail = Self.presentableDetail(stderr) else {
+                guard let detail = ClaudeCLI.Failure.presentableDetail(stderr) else {
                     return String(localized: "Codex exited with code \(Int(status)). Run `codex doctor` in Terminal to check your installation.")
                 }
                 return String(localized: "Codex exited with code \(Int(status)): \(detail)")
             case .rejectedInvocation(let detail):
-                guard let trimmed = Self.presentableDetail(detail) else {
+                guard let trimmed = ClaudeCLI.Failure.presentableDetail(detail) else {
                     return String(localized: "Your Codex CLI rejected this request. Run `codex update` in Terminal or pick another model in Preferences → AI, then try again.")
                 }
                 return String(localized: "Your Codex CLI rejected this request. Run `codex update` in Terminal or pick another model in Preferences → AI, then try again. Details: \(trimmed)")
@@ -217,18 +197,13 @@ extension CodexCLI {
             case .malformedResponse:
                 return String(localized: "Codex returned a response OpenClip could not read. Run `codex update` in Terminal, then try again.")
             case .reportedError(let detail):
-                guard let trimmed = Self.presentableDetail(detail) else {
+                guard let trimmed = ClaudeCLI.Failure.presentableDetail(detail) else {
                     return String(localized: "Codex reported an error. Run `codex update` in Terminal, then try again.")
                 }
                 return String(localized: "Codex reported an error: \(trimmed)")
             case .emptyOutput:
                 return String(localized: "Codex returned an empty response. Try again, or try a shorter selection.")
             }
-        }
-
-        private static func presentableDetail(_ detail: String) -> String? {
-            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
         }
 
         public var errorDescription: String? { message }
@@ -238,15 +213,6 @@ extension CodexCLI {
 // MARK: - Classification
 
 extension CodexCLI {
-    /// A successful transform. Codex has no thinking-token knob to report.
-    public struct Success: Sendable, Equatable {
-        public let text: String
-
-        public init(text: String) {
-            self.text = text
-        }
-    }
-
     /// Fragments (lowercased, substring match) that mean the CLI refused the invocation: a flag it
     /// does not know (`unexpected argument`, measured for `-a`), a subcommand that moved, a model
     /// it does not know, or a config override it could not parse (`Error loading config`,
@@ -260,10 +226,12 @@ extension CodexCLI {
 
     /// Fragments (lowercased, substring match) that mean nobody has logged in. `401 Unauthorized:
     /// Missing bearer or basic authentication` is the measured logged-out shape. The bare word
-    /// "login" is deliberately not here: it would match a login shell or a login hook.
+    /// "login" is deliberately not here: it would match a login shell or a login hook. Nor is the
+    /// bare number 401: stderr carries tracing lines with source locations and byte counts, and
+    /// `file.rs:401` is not a login failure.
     public static let notAuthenticatedPatterns = [
         "not logged in",
-        "401",
+        "401 unauthorized",
         "unauthorized",
         "codex login",
     ]
@@ -281,7 +249,8 @@ extension CodexCLI {
         let item: Item?
     }
 
-    /// Turns one finished invocation into a result or a typed failure.
+    /// Turns one finished invocation into the transformed text or a typed failure. There is no
+    /// success payload beyond the text: codex has no thinking-token knob to report.
     ///
     /// Every JSONL line is scanned. The last `item.completed` whose item is an `agent_message` is
     /// the result — **unless an error event follows it** or the exit is non-zero. An error event
@@ -291,7 +260,7 @@ extension CodexCLI {
     ///
     /// `notFound`, `launchFailed` and `timedOut` are not decidable from a finished invocation —
     /// the caller constructs those.
-    public static func classify(stdout: String, stderr: String, exitStatus: Int32) -> Result<Success, Failure> {
+    public static func classify(stdout: String, stderr: String, exitStatus: Int32) -> Result<String, Failure> {
         var parsedAny = false
         var message: String?
         var errorAfterMessage: String?
@@ -333,7 +302,7 @@ extension CodexCLI {
         }
         let text = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .failure(.emptyOutput) }
-        return .success(Success(text: text))
+        return .success(text)
     }
 
     private static func patternFailure(in text: String) -> Failure? {

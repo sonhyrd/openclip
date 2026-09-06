@@ -154,27 +154,12 @@ public struct AIConfigureForm: View {
                             .textSelection(.enabled)
                     }
 
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Command Line Tool")
-                            Text(aiManager.claudeResolutionDetail.isEmpty
-                                 ? String(localized: "Not detected yet.")
-                                 : aiManager.claudeResolutionDetail)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button(action: redetectClaudeCLI) {
-                            if isRedetectingClaudeCLI {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                            }
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Re-detect the Claude Code CLI installation")
-                        .disabled(isRedetectingClaudeCLI)
-                    }
+                    cliToolRow(
+                        detail: aiManager.claudeResolutionDetail,
+                        isBusy: isRedetectingClaudeCLI,
+                        help: "Re-detect the Claude Code CLI installation",
+                        action: redetectClaudeCLI
+                    )
                     // Resolution is lazy, so without this the user would sit on a fourth state
                     // ("Not detected yet.") until they pressed Re-detect or ran a transform. Only
                     // when this branch is on screen — never at app launch.
@@ -222,33 +207,16 @@ public struct AIConfigureForm: View {
                             .foregroundColor(.red)
                     }
 
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Command Line Tool")
-                            Text(aiManager.codexResolutionDetail.isEmpty
-                                 ? String(localized: "Not detected yet.")
-                                 : aiManager.codexResolutionDetail)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button(action: redetectCodexCLI) {
-                            if isRedetectingCodexCLI {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                            }
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Re-detect the Codex CLI installation")
-                        .disabled(isRedetectingCodexCLI)
-                    }
-                    // Lazy, like the Claude row: resolve the binary and list the catalog only when
-                    // this branch is on screen, never at app launch, and only once per launch.
+                    cliToolRow(
+                        detail: aiManager.codexResolutionDetail,
+                        isBusy: isRedetectingCodexCLI,
+                        help: "Re-detect the Codex CLI installation",
+                        action: redetectCodexCLI
+                    )
+                    // Lazy, like the Claude row: list the catalog only when this branch is on
+                    // screen, never at app launch. The listing resolves the binary first, which
+                    // is what fills the row above.
                     .task {
-                        if aiManager.codexResolutionDetail.isEmpty {
-                            try? await aiManager.resolvedCodexBinaryPath()
-                        }
                         if aiManager.codexModels.isEmpty, !isFetchingCodexModels {
                             fetchCodexModels()
                         }
@@ -363,6 +331,31 @@ public struct AIConfigureForm: View {
         Task { @MainActor in
             try? await aiManager.redetectClaudeCLI()
             isRedetectingClaudeCLI = false
+        }
+    }
+
+    /// The "Command Line Tool" row both CLI providers show: the resolution verdict, and a
+    /// Re-detect button beside it.
+    @ViewBuilder
+    private func cliToolRow(detail: String, isBusy: Bool, help: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Command Line Tool")
+                Text(detail.isEmpty ? String(localized: "Not detected yet.") : detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button(action: action) {
+                if isBusy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+            }
+            .buttonStyle(.borderless)
+            .help(help)
+            .disabled(isBusy)
         }
     }
 

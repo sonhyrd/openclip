@@ -85,7 +85,7 @@ extension CodexCLITests {
 
     func testDiskCandidatesAreTheSharedDirectoriesWithTheCodexName() {
         XCTAssertEqual(
-            CodexCLI.diskCandidatePaths(home: Self.home),
+            ClaudeCLI.diskCandidatePaths(binaryName: "codex", home: Self.home),
             ClaudeCLI.expandedSearchDirectories(home: Self.home).map { $0 + "/codex" }
         )
     }
@@ -115,10 +115,10 @@ extension CodexCLITests {
 
     func testALoneAgentMessageWithExitZeroIsASuccessWithItsText() {
         let stdout = Self.started + "\n" + Self.agentMessage("Corrected text.") + "\n" + #"{"type":"turn.completed","usage":{}}"#
-        guard case .success(let success) = CodexCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
+        guard case .success(let text) = CodexCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
             return XCTFail("Expected a success")
         }
-        XCTAssertEqual(success.text, "Corrected text.")
+        XCTAssertEqual(text, "Corrected text.")
     }
 
     func testTheLoggedOut401EventClassifiesAsNotAuthenticated() {
@@ -147,13 +147,19 @@ extension CodexCLITests {
         XCTAssertEqual(failure(CodexCLI.classify(stdout: stdout, stderr: "", exitStatus: 0)), .reportedError("stream aborted"))
     }
 
+    /// The other shape an error takes in `--json`: an `error` item, completed like any other item.
+    func testAnErrorItemAfterTheAgentMessageIsAFailureWithItsText() {
+        let stdout = Self.agentMessage("Corrected.") + "\n" + #"{"type":"item.completed","item":{"id":"item_2","type":"error","message":"turn aborted"}}"#
+        XCTAssertEqual(failure(CodexCLI.classify(stdout: stdout, stderr: "", exitStatus: 0)), .reportedError("turn aborted"))
+    }
+
     /// A transport retry that then succeeded is not a failed transform: the text arrived.
     func testAnErrorEventBeforeTheAgentMessageDoesNotFailTheTransform() {
         let stdout = #"{"type":"error","message":"Reconnecting... 1/5 (websocket)"}"# + "\n" + Self.agentMessage("Corrected.")
-        guard case .success(let success) = CodexCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
+        guard case .success(let text) = CodexCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
             return XCTFail("A retry the CLI recovered from must not withhold the text")
         }
-        XCTAssertEqual(success.text, "Corrected.")
+        XCTAssertEqual(text, "Corrected.")
     }
 
     /// The model's own words must never classify the run.
@@ -222,7 +228,7 @@ extension CodexCLITests {
 }
 
 extension CodexCLITests {
-    fileprivate func failure(_ result: Result<CodexCLI.Success, CodexCLI.Failure>) -> CodexCLI.Failure? {
+    fileprivate func failure(_ result: Result<String, CodexCLI.Failure>) -> CodexCLI.Failure? {
         guard case .failure(let failure) = result else { return nil }
         return failure
     }

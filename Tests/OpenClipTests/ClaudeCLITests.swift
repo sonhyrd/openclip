@@ -48,16 +48,13 @@ extension ClaudeCLITests {
     func testNoEntryIsABareFloatingAlias() {
         for model in ClaudeCLI.models {
             XCTAssertTrue(model.wireID.hasPrefix("claude-"), "\(model.wireID) is not a wire id")
-            XCTAssertFalse(["sonnet", "opus", "haiku", "fable"].contains(model.wireID))
         }
     }
 
     /// The operator's ask, asserted: what the human sees carries no build stamp.
     func testDisplayNamesCarryNoDateStamp() {
-        let dateStamp = try! NSRegularExpression(pattern: "[0-9]{8}")
         for model in ClaudeCLI.models {
-            let range = NSRange(model.displayName.startIndex..., in: model.displayName)
-            XCTAssertNil(dateStamp.firstMatch(in: model.displayName, range: range).map { _ in model.displayName })
+            XCTAssertNil(model.displayName.range(of: "[0-9]{8}", options: .regularExpression), model.displayName)
         }
     }
 
@@ -71,7 +68,7 @@ extension ClaudeCLITests {
 
 extension ClaudeCLITests {
     /// The default wire id. Every classification below runs with it unless it says otherwise.
-    private static let pinned = ClaudeCLI.defaultModel
+    private static let requested = ClaudeCLI.defaultModel
 
     /// Builds an envelope the way the CLI does — including `subtype`, which nothing may branch on.
     private func envelopeJSON(
@@ -152,6 +149,7 @@ extension ClaudeCLITests {
         XCTAssertTrue(outcome?.message.contains("claude update") == true)
         XCTAssertTrue(outcome?.message.contains("pick another model") == true,
                       "With a picker, a rejected id may be a retired model — the fix is one click away")
+        XCTAssertTrue(outcome?.message.contains("Preferences") == true)
     }
 
     func testUnknownOptionRejection() {
@@ -184,6 +182,7 @@ extension ClaudeCLITests {
         let outcome = failure(ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 1))
         XCTAssertEqual(outcome, .rejectedInvocation("unrecognized_model: claude-nope"))
         XCTAssertTrue(outcome?.message.contains("claude update") == true)
+        XCTAssertTrue(outcome?.message.contains("Preferences") == true)
     }
 
     /// An error envelope carrying nothing a pattern recognises still lands on `.reportedError`
@@ -228,8 +227,8 @@ extension ClaudeCLITests {
 
 extension ClaudeCLITests {
     func testModelUsageIsReadByKeyWhenPresent() {
-        let outcome = ClaudeCLI.modelUsageOutcome([Self.pinned: ClaudeCLI.ModelUsage()], model: Self.pinned)
-        XCTAssertEqual(outcome, .matched(model: Self.pinned))
+        let outcome = ClaudeCLI.modelUsageOutcome([Self.requested: ClaudeCLI.ModelUsage()], model: Self.requested)
+        XCTAssertEqual(outcome, .matched(model: Self.requested))
         XCTAssertNil(outcome.warning)
     }
 
@@ -257,10 +256,10 @@ extension ClaudeCLITests {
     }
 
     func testAbsentModelUsageReportsWhatWasThereInsteadOfFailing() {
-        let outcome = ClaudeCLI.modelUsageOutcome(["claude-haiku-4-5-20251001": ClaudeCLI.ModelUsage()], model: Self.pinned)
-        XCTAssertEqual(outcome, .unexpected(requested: Self.pinned, reportedModels: ["claude-haiku-4-5-20251001"]))
+        let outcome = ClaudeCLI.modelUsageOutcome(["claude-haiku-4-5-20251001": ClaudeCLI.ModelUsage()], model: Self.requested)
+        XCTAssertEqual(outcome, .unexpected(requested: Self.requested, reportedModels: ["claude-haiku-4-5-20251001"]))
         XCTAssertNotNil(outcome.warning, "The caller needs something to log")
-        XCTAssertEqual(ClaudeCLI.modelUsageOutcome(nil, model: Self.pinned), .unexpected(requested: Self.pinned, reportedModels: []))
+        XCTAssertEqual(ClaudeCLI.modelUsageOutcome(nil, model: Self.requested), .unexpected(requested: Self.requested, reportedModels: []))
     }
 
     /// The severity rule, asserted directly: the transform succeeded and the corrected text is in
@@ -275,7 +274,7 @@ extension ClaudeCLITests {
             return XCTFail("A missing model-usage entry must never be a failure")
         }
         XCTAssertEqual(success.text, "Corrected text.")
-        XCTAssertEqual(success.modelUsage, .unexpected(requested: Self.pinned, reportedModels: ["some-other-model"]))
+        XCTAssertEqual(success.modelUsage, .unexpected(requested: Self.requested, reportedModels: ["some-other-model"]))
     }
 
     /// `usage.output_tokens_details.thinking_tokens`, as measured against CLI 2.1.259. The
@@ -306,7 +305,7 @@ extension ClaudeCLITests {
         guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
             return XCTFail("A missing model-usage map must never be a failure")
         }
-        XCTAssertEqual(success.modelUsage, .unexpected(requested: Self.pinned, reportedModels: []))
+        XCTAssertEqual(success.modelUsage, .unexpected(requested: Self.requested, reportedModels: []))
     }
 }
 
@@ -323,7 +322,7 @@ extension ClaudeCLITests {
             return XCTFail("A reshaped telemetry field must never withhold the transformed text")
         }
         XCTAssertEqual(success.text, "Corrected.")
-        XCTAssertEqual(success.modelUsage, .unexpected(requested: Self.pinned, reportedModels: []))
+        XCTAssertEqual(success.modelUsage, .unexpected(requested: Self.requested, reportedModels: []))
     }
 
     /// The empty `ModelUsage` struct decodes no fields, so it absorbs whatever the value turns
@@ -334,7 +333,7 @@ extension ClaudeCLITests {
         guard case .success(let success) = ClaudeCLI.classify(stdout: stdout, stderr: "", exitStatus: 0) else {
             return XCTFail("Expected a success")
         }
-        XCTAssertEqual(success.modelUsage, .matched(model: Self.pinned))
+        XCTAssertEqual(success.modelUsage, .matched(model: Self.requested))
     }
 
     func testLoggedModelRendersFromTheOutcomesOwnPayload() {

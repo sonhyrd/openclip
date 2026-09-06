@@ -18,11 +18,6 @@ public enum ClaudeCLI {
         /// The exact string sent over `--model`. Dated where the catalog has a dated first-party id,
         /// undated where that is all the CLI knows.
         public let wireID: String
-
-        public init(displayName: String, wireID: String) {
-            self.displayName = displayName
-            self.wireID = wireID
-        }
     }
 
     /// The models the picker offers, in catalog order.
@@ -323,7 +318,8 @@ extension ClaudeCLI {
         /// The trimmed detail, or nil when there is nothing worth showing the user. Three cases
         /// carried the same trim-and-test; only that is shared — each still picks its own copy for
         /// the with-detail and without-detail outcomes, because the advice differs.
-        private static func presentableDetail(_ detail: String) -> String? {
+        /// Shared with `CodexCLI.Failure`, whose messages trim their detail the same way.
+        static func presentableDetail(_ detail: String) -> String? {
             let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }

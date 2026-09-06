@@ -68,14 +68,14 @@ public final class CodexCLIProvider: AIProvider {
                         stderr: output.stderr,
                         exitStatus: output.terminationStatus
                     ) {
-                    case .success(let success):
+                    case .success(let text):
                         // Model and exit status only: codex has no thinking-token knob to log, and
                         // the selection and the transformed text are never logged at all.
                         Log.ai.info("""
                             Codex CLI transform succeeded (exit \(output.terminationStatus, privacy: .public), \
                             model \(self.model, privacy: .public))
                             """)
-                        continuation.yield(success.text)
+                        continuation.yield(text)
                         continuation.finish()
                     case .failure(let failure):
                         throw failure
