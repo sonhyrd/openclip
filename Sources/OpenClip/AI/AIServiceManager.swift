@@ -49,6 +49,16 @@ public final class AIServiceManager: ObservableObject {
     @AppStorage("aiCloudModel") public var cloudModel: String = "gpt-4o-mini" {
         willSet { objectWillChange.send() }
     }
+    /// The Claude CLI wire id sent over `--model`. Defaults to the dated pin ADR 0001 verified; the
+    /// picker in Provider Settings offers the transcribed catalog. Same convention as `cloudModel`.
+    @AppStorage("aiClaudeCLIModel") public var claudeCLIModel: String = ClaudeCLI.defaultModel {
+        willSet { objectWillChange.send() }
+    }
+    /// The Codex CLI wire id sent over `-m`. Defaults to a stable literal, not the catalog's first
+    /// entry, which moves without notice.
+    @AppStorage("aiCodexModel") public var codexModel: String = CodexCLI.defaultModel {
+        willSet { objectWillChange.send() }
+    }
     @AppStorage("aiOllamaURL") public var ollamaURL: String = "http://localhost:11434" {
         willSet { objectWillChange.send() }
     }
@@ -97,9 +107,9 @@ public final class AIServiceManager: ObservableObject {
     /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves.
     @discardableResult
     public func redetectClaudeCLI() async throws -> String {
-        let (path, detail) = await Self.detectClaudeBinary()
+        let (path, detail) = await Self.detectBinary(named: ClaudeCLI.binaryName, onDisk: ClaudeCLI.resolveOnDisk())
         claudeBinaryPath = path
-        claudeResolutionDetail = detail
+        claudeResolutionDetail = detail ?? String(localized: "claude not found — install Claude Code and run `claude login`")
         guard let path else {
             Log.ai.error("Claude CLI not found via login shell or known install directories")
             throw ClaudeCLI.Failure.notFound
@@ -111,29 +121,89 @@ public final class AIServiceManager: ObservableObject {
         return path
     }
 
-    /// Login shell first, then the known install directories. Nonisolated: it only spawns a
-    /// subprocess and reads the filesystem; the caller lands both values back on the main actor.
-    private nonisolated static func detectClaudeBinary() async -> (path: String?, detail: String) {
-        if let path = await loginShellClaudePath() {
-            return (path, String(localized: "Found via login shell: \(path)"))
-        }
-        if let path = ClaudeCLI.resolveOnDisk() {
-            return (path, String(localized: "Found on disk: \(path)"))
-        }
-        return (nil, String(localized: "claude not found — install Claude Code and run `claude login`"))
+    // MARK: - Codex CLI resolution cache and catalog
+    //
+    // The same shape as the Claude cache above, for the same reasons: a binary path is runtime
+    // state, never persisted. The catalog is cached per app launch too — it is what the installed
+    // codex renders, and it only shapes the picker.
+
+    /// The resolved `codex` binary, or nil when resolution has not run or found nothing.
+    @Published public private(set) var codexBinaryPath: String?
+
+    /// User-facing account of the last codex resolution attempt. Empty until it has run once.
+    @Published public private(set) var codexResolutionDetail: String = ""
+
+    /// The models the installed codex lists, from `codex debug models`. Empty until fetched.
+    @Published public private(set) var codexModels: [CodexCLI.Model] = []
+
+    @discardableResult
+    public func resolvedCodexBinaryPath() async throws -> String {
+        if let codexBinaryPath { return codexBinaryPath }
+        return try await redetectCodexCLI()
     }
 
-    /// `/bin/zsh -l -c "command -v claude"` — a **login** shell, because a GUI app launched from
+    @discardableResult
+    public func redetectCodexCLI() async throws -> String {
+        let (path, detail) = await Self.detectBinary(named: CodexCLI.binaryName, onDisk: CodexCLI.resolveOnDisk())
+        codexBinaryPath = path
+        codexResolutionDetail = detail ?? String(localized: "codex not found — install Codex and run `codex login`")
+        guard let path else {
+            Log.ai.error("Codex CLI not found via login shell or known install directories")
+            throw CodexCLI.Failure.notFound
+        }
+        Log.ai.info("Codex CLI resolved at \(path, privacy: .public)")
+        return path
+    }
+
+    /// Runs `codex debug models` and replaces `codexModels`. Only ever called from the Codex
+    /// branch of Provider Settings — never at app launch. Same stripped environment, isolated
+    /// directory and discovery budget as a transform; the listing reads the user's config.toml
+    /// (`debug` takes no `--ignore-user-config`) and never runs a model.
+    /// - Throws: `CodexCLI.Failure` when the binary is missing, the listing fails or does not parse.
+    public func fetchCodexCatalog() async throws {
+        let binary = try await resolvedCodexBinaryPath()
+        let invocation = ShellProcessRunner.Invocation(
+            executableURL: URL(fileURLWithPath: binary),
+            arguments: CodexCLI.catalogArguments,
+            environment: CodexCLI.childEnvironment(inherited: ProcessInfo.processInfo.environment, binaryPath: binary),
+            timeout: ClaudeCLI.discoveryTimeout,
+            currentDirectoryURL: CodexCLI.isolatedWorkingDirectory()
+        )
+        let output = try await ShellProcessRunner.runCapturingExit(invocation)
+        guard output.terminationStatus == 0 else {
+            throw CodexCLI.Failure.exited(status: output.terminationStatus, stderr: output.stderr)
+        }
+        guard let models = CodexCLI.decodeCatalog(stdout: output.stdout) else {
+            throw CodexCLI.Failure.malformedResponse
+        }
+        codexModels = models
+        Log.ai.info("Codex catalog listed \(models.count, privacy: .public) models")
+    }
+
+    /// Login shell first, then the known install directories. Nonisolated: it only spawns a
+    /// subprocess and reads the filesystem; the caller lands both values back on the main actor.
+    /// Returns nil detail when nothing was found, so each caller supplies its own not-found copy.
+    private nonisolated static func detectBinary(named binaryName: String, onDisk: String?) async -> (path: String?, detail: String?) {
+        if let path = await loginShellPath(of: binaryName) {
+            return (path, String(localized: "Found via login shell: \(path)"))
+        }
+        if let path = onDisk {
+            return (path, String(localized: "Found on disk: \(path)"))
+        }
+        return (nil, nil)
+    }
+
+    /// `/bin/zsh -l -c "command -v <binary>"` — a **login** shell, because a GUI app launched from
     /// Finder does not inherit the terminal's PATH. Without the `-l`, lookup fails on a machine
-    /// where `claude` works perfectly well in Terminal, and that reads to the user as "the app is
-    /// broken". This is the feature's number-one silent failure mode.
+    /// where the binary works perfectly well in Terminal, and that reads to the user as "the app
+    /// is broken". This is the CLI providers' number-one silent failure mode.
     ///
     /// Goes through the shared `ShellProcessRunner` executor (one watchdog, one process-group kill)
     /// rather than a hand-rolled `Process`.
-    private nonisolated static func loginShellClaudePath() async -> String? {
+    private nonisolated static func loginShellPath(of binaryName: String) async -> String? {
         let invocation = ShellProcessRunner.Invocation(
             executableURL: URL(fileURLWithPath: "/bin/zsh"),
-            arguments: ["-l", "-c", "command -v \(ClaudeCLI.binaryName)"],
+            arguments: ["-l", "-c", "command -v \(binaryName)"],
             // The real environment, so HOME/USER are set and the login shell finds the profile
             // files whose PATH exports are the whole point of using `-l`.
             environment: ProcessInfo.processInfo.environment,
@@ -288,8 +358,12 @@ public final class AIServiceManager: ObservableObject {
         case .claudeCLI:
             // The provider is handed the manager's cached resolver, not a path: this property
             // rebuilds the provider on every access, so the cache has to outlive it.
-            return ClaudeCLIProvider(resolveBinaryPath: {
+            return ClaudeCLIProvider(model: claudeCLIModel, resolveBinaryPath: {
                 try await self.resolvedClaudeBinaryPath()
+            })
+        case .codexCLI:
+            return CodexCLIProvider(model: codexModel, resolveBinaryPath: {
+                try await self.resolvedCodexBinaryPath()
             })
         }
     }

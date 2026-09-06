@@ -2659,6 +2659,314 @@
         }
       }
     },
+    "Codex (local CLI)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex（本地 CLI）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex（本機 CLI）"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex (CLI local)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex（ローカル CLI）"
+          }
+        }
+      }
+    },
+    "Codex CLI": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI"
+          }
+        }
+      }
+    },
+    "Codex CLI not found. Install it, run `codex login`, then use Re-detect in Preferences → AI.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 Codex CLI。请先安装并运行 `codex login`，然后在“偏好设置 → AI”中点击重新检测。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到 Codex CLI。請先安裝並執行 `codex login`，然後在「偏好設定 → AI」中按下重新偵測。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI introuvable. Installez-le, exécutez `codex login`, puis utilisez Redétecter dans Préférences → IA."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI が見つかりません。インストールして `codex login` を実行し、「環境設定 → AI」で再検出してください。"
+          }
+        }
+      }
+    },
+    "Codex did not respond within %lld seconds. Try again, or try a shorter selection.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 在 %lld 秒内没有响应。请重试，或选择更短的文本。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 在 %lld 秒內沒有回應。請再試一次，或選取較短的文字。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex n'a pas répondu en %lld secondes. Réessayez, ou essayez une sélection plus courte."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex が %lld 秒以内に応答しませんでした。もう一度試すか、短いテキストを選択してください。"
+          }
+        }
+      }
+    },
+    "Codex exited with code %lld. Run `codex doctor` in Terminal to check your installation.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 以代码 %lld 退出。请在终端运行 `codex doctor` 检查安装状态。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 以代碼 %lld 結束。請在終端機執行 `codex doctor` 檢查安裝狀態。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex s'est terminé avec le code %lld. Exécutez `codex doctor` dans le Terminal pour vérifier votre installation."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex はコード %lld で終了しました。ターミナルで `codex doctor` を実行してインストールを確認してください。"
+          }
+        }
+      }
+    },
+    "Codex exited with code %lld: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 以代码 %lld 退出：%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 以代碼 %lld 結束：%@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex s'est terminé avec le code %lld : %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex はコード %lld で終了しました：%@"
+          }
+        }
+      }
+    },
+    "Codex is not logged in. Run `codex login` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 尚未登录。请在终端运行 `codex login` 后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 尚未登入。請在終端機執行 `codex login` 後再試一次。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex n'est pas connecté. Exécutez `codex login` dans le Terminal, puis réessayez."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex はログインしていません。ターミナルで `codex login` を実行してから、もう一度お試しください。"
+          }
+        }
+      }
+    },
+    "Codex reported an error. Run `codex update` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 报告了一个错误。请在终端运行 `codex update` 后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 回報了一個錯誤。請在終端機執行 `codex update` 後再試一次。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex a signalé une erreur. Exécutez `codex update` dans le Terminal, puis réessayez."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex がエラーを報告しました。ターミナルで `codex update` を実行してから、もう一度お試しください。"
+          }
+        }
+      }
+    },
+    "Codex reported an error: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 报告了一个错误：%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 回報了一個錯誤：%@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex a signalé une erreur : %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex がエラーを報告しました：%@"
+          }
+        }
+      }
+    },
+    "Codex returned a response OpenClip could not read. Run `codex update` in Terminal, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 返回了 OpenClip 无法解析的响应。请在终端运行 `codex update` 后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 回傳了 OpenClip 無法解析的回應。請在終端機執行 `codex update` 後再試一次。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex a renvoyé une réponse qu'OpenClip n'a pas pu lire. Exécutez `codex update` dans le Terminal, puis réessayez."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex が OpenClip で読み取れない応答を返しました。ターミナルで `codex update` を実行してから、もう一度お試しください。"
+          }
+        }
+      }
+    },
+    "Codex returned an empty response. Try again, or try a shorter selection.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 返回了空响应。请重试，或选择更短的文本。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex 回傳了空的回應。請再試一次，或選取較短的文字。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex a renvoyé une réponse vide. Réessayez, ou essayez une sélection plus courte."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex が空の応答を返しました。もう一度試すか、短いテキストを選択してください。"
+          }
+        }
+      }
+    },
     "Collapse %@": {
       "localizations": {
         "zh-Hans": {
@@ -3123,6 +3431,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法启动 Claude Code CLI：%@。请在“偏好设置 → AI”中检查路径并点击重新检测。"
+          }
+        }
+      }
+    },
+    "Could not start the Codex CLI: %@. Check the path in Preferences → AI and use Re-detect.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法启动 Codex CLI：%@。请在“偏好设置 → AI”中检查路径并点击重新检测。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法啟動 Codex CLI：%@。請在「偏好設定 → AI」中檢查路徑並按下重新偵測。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Impossible de démarrer le Codex CLI : %@. Vérifiez le chemin dans Préférences → IA et utilisez Redétecter."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI を起動できませんでした：%@。「環境設定 → AI」でパスを確認し、再検出してください。"
           }
         }
       }
@@ -4523,6 +4859,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "ローカルのOllamaインスタンスからインストール済みモデルを取得"
+          }
+        }
+      }
+    },
+    "Fetch the models the installed Codex CLI lists": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "获取已安装的 Codex CLI 列出的模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取得已安裝的 Codex CLI 列出的模型"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Récupérer les modèles listés par le Codex CLI installé"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "インストール済みの Codex CLI が一覧表示するモデルを取得"
           }
         }
       }
@@ -8515,6 +8879,34 @@
         }
       }
     },
+    "Re-detect the Codex CLI installation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新检测 Codex CLI 安装"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新偵測 Codex CLI 安裝"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Redétecter l'installation du Codex CLI"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI のインストールを再検出"
+          }
+        }
+      }
+    },
     "Release Notes": {
       "localizations": {
         "zh-Hans": {
@@ -11931,22 +12323,114 @@
         }
       }
     },
-    "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again.": {
+    "Your Claude Code CLI rejected this request. Run `claude update` in Terminal or pick another model in Preferences → AI, then try again.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你的 Claude Code CLI 拒绝了此请求 — 版本可能过旧。请在终端运行 `claude update` 后重试。"
+            "value": "你的 Claude Code CLI 拒绝了此请求。请在终端运行 `claude update`，或在“偏好设置 → AI”中选择其他模型，然后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Claude Code CLI 拒絕了此請求。請在終端機執行 `claude update`，或在「偏好設定 → AI」中選擇其他模型，然後再試一次。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Votre Claude Code CLI a refusé cette requête. Exécutez `claude update` dans le Terminal ou choisissez un autre modèle dans Préférences → IA, puis réessayez."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code CLI がこのリクエストを拒否しました。ターミナルで `claude update` を実行するか、「環境設定 → AI」で別のモデルを選択して、もう一度お試しください。"
           }
         }
       }
     },
-    "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again. Details: %@": {
+    "Your Claude Code CLI rejected this request. Run `claude update` in Terminal or pick another model in Preferences → AI, then try again. Details: %@": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你的 Claude Code CLI 拒绝了此请求 — 版本可能过旧。请在终端运行 `claude update` 后重试。详情：%@"
+            "value": "你的 Claude Code CLI 拒绝了此请求。请在终端运行 `claude update`，或在“偏好设置 → AI”中选择其他模型，然后重试。详情：%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Claude Code CLI 拒絕了此請求。請在終端機執行 `claude update`，或在「偏好設定 → AI」中選擇其他模型，然後再試一次。詳細資訊：%@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Votre Claude Code CLI a refusé cette requête. Exécutez `claude update` dans le Terminal ou choisissez un autre modèle dans Préférences → IA, puis réessayez. Détails : %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code CLI がこのリクエストを拒否しました。ターミナルで `claude update` を実行するか、「環境設定 → AI」で別のモデルを選択して、もう一度お試しください。詳細：%@"
+          }
+        }
+      }
+    },
+    "Your Codex CLI rejected this request. Run `codex update` in Terminal or pick another model in Preferences → AI, then try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Codex CLI 拒绝了此请求。请在终端运行 `codex update`，或在“偏好设置 → AI”中选择其他模型，然后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Codex CLI 拒絕了此請求。請在終端機執行 `codex update`，或在「偏好設定 → AI」中選擇其他模型，然後再試一次。"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Votre Codex CLI a refusé cette requête. Exécutez `codex update` dans le Terminal ou choisissez un autre modèle dans Préférences → IA, puis réessayez."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI がこのリクエストを拒否しました。ターミナルで `codex update` を実行するか、「環境設定 → AI」で別のモデルを選択して、もう一度お試しください。"
+          }
+        }
+      }
+    },
+    "Your Codex CLI rejected this request. Run `codex update` in Terminal or pick another model in Preferences → AI, then try again. Details: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Codex CLI 拒绝了此请求。请在终端运行 `codex update`，或在“偏好设置 → AI”中选择其他模型，然后重试。详情：%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的 Codex CLI 拒絕了此請求。請在終端機執行 `codex update`，或在「偏好設定 → AI」中選擇其他模型，然後再試一次。詳細資訊：%@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Votre Codex CLI a refusé cette requête. Exécutez `codex update` dans le Terminal ou choisissez un autre modèle dans Préférences → IA, puis réessayez. Détails : %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codex CLI がこのリクエストを拒否しました。ターミナルで `codex update` を実行するか、「環境設定 → AI」で別のモデルを選択して、もう一度お試しください。詳細：%@"
           }
         }
       }
@@ -11985,6 +12469,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "未找到 claude — 请安装 Claude Code 并运行 `claude login`"
+          }
+        }
+      }
+    },
+    "codex not found — install Codex and run `codex login`": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 codex — 请安装 Codex 并运行 `codex login`"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到 codex — 請安裝 Codex 並執行 `codex login`"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "codex introuvable — installez Codex et exécutez `codex login`"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "codex が見つかりません — Codex をインストールして `codex login` を実行してください"
           }
         }
       }

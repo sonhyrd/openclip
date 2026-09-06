@@ -87,6 +87,25 @@ construction site in `ClaudeCLI.arguments(prompt:)` carries a comment pointing h
 
 ## 4. The dated model pin, and why not an alias
 
+> **Amended 2026-09-06** ([#18](https://github.com/sonhyrd/openclip/issues/18),
+> [#19](https://github.com/sonhyrd/openclip/issues/19)). This section was written when the model
+> was a pin with no picker. It now governs the **default**, not the only option:
+>
+> - The default wire id stays `claude-sonnet-4-5-20250929`, dated, for every reason below.
+> - Provider Settings now offers a picker over the catalog embedded in the installed CLI (the
+>   binary's own "Hand-maintained baked-in model catalog"; the CLI cannot enumerate models). The
+>   picker shows the **display name** ("Sonnet 4.5") with the **wire id** as a caption. The bare
+>   floating aliases (`sonnet`, `opus`, `haiku`, `fable`) are never offered.
+> - A model the **user** picks is an explicit choice, not the silent alias this section forbids.
+>   Where the catalog carries only an undated id (Sonnet 4.6, Sonnet 5, Opus 4.6+, Opus 5, Fable),
+>   the picker offers that id. The surviving half of the argument below is **visibility**: the
+>   model-usage lookup (§6.1) is keyed by the *selected* wire id, exact key, no prefix match, so an
+>   undated choice the CLI reports under a dated key logs a warning naming what actually ran.
+> - The rejected-invocation message now also says to pick another model, because with a picker a
+>   rejected id may be a retired one rather than an old CLI.
+> - "There is no model picker" below is therefore no longer true; the paragraph is left as
+>   written so the original reasoning stays legible.
+
 `claude-sonnet-4-5-20250929` — a **dated** identifier, never a floating alias. An alias is what
 silently put the upstream project on Opus, at Opus pricing and latency, invisibly. A stale dated
 identifier is instead a *visible* maintenance task: the CLI rejects it outright, classification turns

@@ -11,10 +11,63 @@ import Foundation
 
 /// Builds the isolated `claude` invocation.
 public enum ClaudeCLI {
-    /// Pinned, **dated** model identifier — never a floating alias. An alias silently moves the
-    /// invocation onto a different (and more expensive) model; a stale dated id is rejected
-    /// outright by the CLI, which makes the upgrade a visible maintenance task instead.
-    public static let model = "claude-sonnet-4-5-20250929"
+    /// One entry of the model table: what the human sees, and what goes over `--model`.
+    public struct Model: Sendable, Equatable, Hashable {
+        /// The readable name ("Sonnet 4.5"). Never a date stamp.
+        public let displayName: String
+        /// The exact string sent over `--model`. Dated where the catalog has a dated first-party id,
+        /// undated where that is all the CLI knows.
+        public let wireID: String
+
+        public init(displayName: String, wireID: String) {
+            self.displayName = displayName
+            self.wireID = wireID
+        }
+    }
+
+    /// The models the picker offers, in catalog order.
+    ///
+    /// **Provenance.** The Claude Code CLI cannot enumerate its models (2.1.263 has no `models`
+    /// subcommand), so this is a transcription of the catalog embedded in the installed binary:
+    /// `~/.local/share/claude/versions/2.1.263`, the string marker "Hand-maintained baked-in model
+    /// catalog", fields `id`, `display_name` and `first_party`. `first_party` is the wire id here.
+    /// Mythos 5 is omitted: the catalog carries no first-party id for it, so there is nothing to
+    /// send. The bare floating aliases (`sonnet`, `opus`, `haiku`, `fable`) are never offered —
+    /// those are what ADR 0001 §4 forbids. Re-transcribe against a newer binary when the list goes
+    /// stale; a retired entry surfaces through `rejectedInvocation`, not silently.
+    public static let models: [Model] = [
+        Model(displayName: "Haiku 3.5", wireID: "claude-3-5-haiku-20241022"),
+        Model(displayName: "Haiku 4.5", wireID: "claude-haiku-4-5-20251001"),
+        Model(displayName: "Sonnet 3.5", wireID: "claude-3-5-sonnet-20241022"),
+        Model(displayName: "Sonnet 3.7", wireID: "claude-3-7-sonnet-20250219"),
+        Model(displayName: "Sonnet 4", wireID: "claude-sonnet-4-20250514"),
+        Model(displayName: "Sonnet 4.5", wireID: "claude-sonnet-4-5-20250929"),
+        Model(displayName: "Sonnet 4.6", wireID: "claude-sonnet-4-6"),
+        Model(displayName: "Sonnet 5", wireID: "claude-sonnet-5"),
+        Model(displayName: "Opus 4", wireID: "claude-opus-4-20250514"),
+        Model(displayName: "Opus 4.1", wireID: "claude-opus-4-1-20250805"),
+        Model(displayName: "Opus 4.5", wireID: "claude-opus-4-5-20251101"),
+        Model(displayName: "Opus 4.6", wireID: "claude-opus-4-6"),
+        Model(displayName: "Opus 4.7", wireID: "claude-opus-4-7"),
+        Model(displayName: "Opus 4.8", wireID: "claude-opus-4-8"),
+        Model(displayName: "Opus 5", wireID: "claude-opus-5"),
+        Model(displayName: "Fable 5", wireID: "claude-fable-5"),
+        Model(displayName: "Fable 5.1", wireID: "claude-fable-5-1"),
+    ]
+
+    /// The **default** wire id: dated, deliberately, and never a floating alias. An alias the app
+    /// picked on its own would silently move every transform onto a different model; a stale dated
+    /// id is rejected outright by the CLI, which makes the upgrade a visible maintenance task. A
+    /// model the user picks from `models` is a different thing — an explicit choice, logged per
+    /// run — so the picker may offer undated ids while the default stays dated (ADR 0001 §4, as
+    /// amended).
+    public static let defaultModel = "claude-sonnet-4-5-20250929"
+
+    /// The display name for a wire id, or the wire id itself when it is not in the table (a
+    /// stored choice that outlived a re-transcription still has to render as something).
+    public static func displayName(for wireID: String) -> String {
+        models.first { $0.wireID == wireID }?.displayName ?? wireID
+    }
 
     /// One-line role only. The correction rules live in `-p`, not here — see `arguments(prompt:)`.
     public static let systemPromptRole = "You are an inline text transformation tool. Output only the transformed text."
@@ -29,7 +82,9 @@ public enum ClaudeCLI {
     ///   built by the caller in the app target. The user's selected text is **not** in here and not
     ///   in the argument list at all — it arrives over stdin, so quotes, backticks and newlines in
     ///   a selection can never be misread as arguments.
-    public static func arguments(prompt: String) -> [String] {
+    /// - Parameter model: the wire id to send over `--model`, verbatim — the user's choice, or
+    ///   `defaultModel`.
+    public static func arguments(prompt: String, model: String) -> [String] {
         [
             // The rules stay in `-p`; `--system-prompt` stays a one-line role. Moving the rules
             // into `--system-prompt` measured 7/15 against 14/14 upstream, and it fails SILENTLY:
@@ -114,7 +169,7 @@ extension ClaudeCLI {
     }
 
     /// One entry of the envelope's model-usage map. Deliberately empty: only the *presence of the
-    /// pinned model as a key* is read (see `modelUsageOutcome`), and decoding no fields is what
+    /// requested model as a key* is read (see `modelUsageOutcome`), and decoding no fields is what
     /// guarantees a telemetry field that moves or disappears can never turn a successful transform
     /// into a decoding failure.
     public struct ModelUsage: Decodable, Sendable, Equatable {
@@ -138,7 +193,7 @@ extension ClaudeCLI {
 // MARK: - The keyed model lookup
 
 extension ClaudeCLI {
-    /// The outcome of reading the model-usage map **by the pinned identifier as the key**.
+    /// The outcome of reading the model-usage map **by the requested wire id as the key**.
     ///
     /// This is data, not a failure and not a log call: the Core type may not log (Foundation only),
     /// so the app-target caller logs whatever this says. There is deliberately no case a caller
@@ -146,21 +201,22 @@ extension ClaudeCLI {
     /// transform succeeded and the corrected text is in hand; refusing to hand it to the user
     /// because a telemetry field moved is the wrong trade in a popup utility.
     public enum ModelUsageOutcome: Sendable, Equatable {
-        /// The pinned identifier was present. Extra entries (the CLI's own side-calls) are normal.
-        case matched(ModelUsage)
-        /// The pinned identifier was absent. Carries the keys that were there, sorted — the only
-        /// signal that would ever reveal the pin no longer resolving to what was requested, which
-        /// is exactly what the dated pin exists to keep visible.
-        case unexpected(reportedModels: [String])
+        /// The requested wire id was present. Extra entries (the CLI's own side-calls) are normal.
+        case matched(model: String)
+        /// The requested wire id was absent. Carries the keys that were there, sorted — the only
+        /// signal that would ever reveal the request resolving to something else, which is exactly
+        /// the visibility ADR 0001 §4 exists to keep. Exact key, no prefix match: an undated choice
+        /// that the CLI reports under a dated key lands here, and the warning names what ran.
+        case unexpected(requested: String, reportedModels: [String])
 
         /// The model identifier to name in the caller's log line. Lives here, beside `warning`,
         /// because it is rendered from this enum's own payload — the app target was reaching in and
         /// re-deriving it from the associated values.
         public var loggedModel: String {
             switch self {
-            case .matched:
-                return ClaudeCLI.model
-            case .unexpected(let models):
+            case .matched(let model):
+                return model
+            case .unexpected(_, let models):
                 return models.isEmpty ? "unreported" : models.joined(separator: ", ")
             }
         }
@@ -171,19 +227,19 @@ extension ClaudeCLI {
             switch self {
             case .matched:
                 return nil
-            case .unexpected(let models):
+            case .unexpected(let requested, let models):
                 let listed = models.isEmpty ? "none" : models.joined(separator: ", ")
-                return "Claude CLI reported no usage for pinned model \(ClaudeCLI.model); reported: \(listed)"
+                return "Claude CLI reported no usage for requested model \(requested); reported: \(listed)"
             }
         }
     }
 
     /// Reads the model-usage map by key. Total: every input produces an outcome, never a failure.
-    public static func modelUsageOutcome(_ usage: [String: ModelUsage]?) -> ModelUsageOutcome {
-        if let entry = usage?[model] {
-            return .matched(entry)
+    public static func modelUsageOutcome(_ usage: [String: ModelUsage]?, model: String) -> ModelUsageOutcome {
+        if usage?[model] != nil {
+            return .matched(model: model)
         }
-        return .unexpected(reportedModels: usage.map { $0.keys.sorted() } ?? [])
+        return .unexpected(requested: model, reportedModels: usage.map { $0.keys.sorted() } ?? [])
     }
 
     /// A successful transform plus the (never fatal) model-lookup outcome for the caller to log.
@@ -220,8 +276,8 @@ extension ClaudeCLI {
         /// A non-zero exit that nothing more specific explains. Carries the raw stderr so a novel
         /// failure is still actionable rather than opaque.
         case exited(status: Int32, stderr: String)
-        /// The CLI refused the invocation itself — an unknown flag or an unrecognised model, i.e.
-        /// a CLI too old for the flags this provider pins.
+        /// The CLI refused the invocation itself — an unknown flag, or a model id the CLI does not
+        /// know: a CLI too old for the flags this provider pins, or a picked model it has retired.
         case rejectedInvocation(String)
         /// The CLI is installed but nobody has run `claude login`.
         case notAuthenticated
@@ -247,9 +303,9 @@ extension ClaudeCLI {
                 return String(localized: "Claude Code exited with code \(Int(status)): \(detail)")
             case .rejectedInvocation(let detail):
                 guard let trimmed = Self.presentableDetail(detail) else {
-                    return String(localized: "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again.")
+                    return String(localized: "Your Claude Code CLI rejected this request. Run `claude update` in Terminal or pick another model in Preferences → AI, then try again.")
                 }
-                return String(localized: "Your Claude Code CLI rejected this request — it is probably out of date. Run `claude update` in Terminal, then try again. Details: \(trimmed)")
+                return String(localized: "Your Claude Code CLI rejected this request. Run `claude update` in Terminal or pick another model in Preferences → AI, then try again. Details: \(trimmed)")
             case .notAuthenticated:
                 return String(localized: "Claude Code is not logged in. Run `claude login` in Terminal, then try again.")
             case .malformedResponse:
@@ -327,14 +383,15 @@ extension ClaudeCLI {
     }
 
     /// The candidate paths to test, in order — `expandedSearchDirectories` with the binary name
-    /// appended. Pure: touches no filesystem, so it is directly assertable in a test.
-    public static func diskCandidatePaths(home: String = NSHomeDirectory()) -> [String] {
+    /// appended. Pure: touches no filesystem, so it is directly assertable in a test. Shared with
+    /// `CodexCLI`, which passes its own binary name; the directory list is one list on purpose.
+    public static func diskCandidatePaths(binaryName: String = binaryName, home: String = NSHomeDirectory()) -> [String] {
         expandedSearchDirectories(home: home).map { $0 + "/" + binaryName }
     }
 
     /// Variables removed from the child, all for one reason: each can redirect or re-bill an
     /// invocation this provider promises runs on *the user's own Claude subscription*, against
-    /// Anthropic, on the pinned model. `--setting-sources ""` closes the settings-file door; this
+    /// Anthropic, on the requested model. `--setting-sources ""` closes the settings-file door; this
     /// list closes the environment door beside it, which would otherwise be wide open.
     ///
     /// - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` — shadow the subscription login and bill an
@@ -344,7 +401,7 @@ extension ClaudeCLI {
     /// - `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` — send the user's selected text to an
     ///   arbitrary endpoint. On a utility that acts on whatever is selected, that is the whole
     ///   blast-radius argument ADR 0001 makes about tools and MCP servers, applied to the wire.
-    /// - `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` — compete with the dated `--model` pin.
+    /// - `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` — compete with the `--model` the user chose.
     ///   The flag should win for the main call; the small fast model has no flag pinning it at all.
     public static let strippedEnvironmentKeys = [
         "ANTHROPIC_API_KEY",
@@ -369,15 +426,32 @@ extension ClaudeCLI {
         binaryPath: String,
         home: String = NSHomeDirectory()
     ) -> [String: String] {
-        var environment = inherited
-        // Subscription-only, against Anthropic, on the pinned model — by construction rather than
+        // Subscription-only, against Anthropic, on the requested model — by construction rather than
         // by hoping the machine carries none of these. See `strippedEnvironmentKeys`.
-        for key in strippedEnvironmentKeys {
+        var environment = shapedEnvironment(
+            inherited: inherited,
+            stripping: strippedEnvironmentKeys,
+            binaryPath: binaryPath,
+            home: home
+        )
+        environment["MAX_THINKING_TOKENS"] = "0"
+        return environment
+    }
+
+    /// The strip-and-prefix step both CLI providers share: remove `keys`, then put the binary's
+    /// own directory and the known install directories ahead of whatever `PATH` was inherited. A
+    /// GUI app launched from Finder inherits a minimal PATH, and a version-managed install keeps
+    /// its runtime beside the binary. `CodexCLI` calls this with its own strip list.
+    public static func shapedEnvironment(
+        inherited: [String: String],
+        stripping keys: [String],
+        binaryPath: String,
+        home: String
+    ) -> [String: String] {
+        var environment = inherited
+        for key in keys {
             environment.removeValue(forKey: key)
         }
-        environment["MAX_THINKING_TOKENS"] = "0"
-        // A GUI app launched from Finder inherits a minimal PATH. Prefix the binary's own directory
-        // and the known install directories, keeping whatever we did inherit as the tail.
         let directories = [(binaryPath as NSString).deletingLastPathComponent]
             + expandedSearchDirectories(home: home)
         environment["PATH"] = (directories + [inherited["PATH"] ?? ""])
@@ -399,9 +473,10 @@ extension ClaudeCLI {
     /// environment door (`strippedEnvironmentKeys`).
     ///
     /// Falls back to the temp directory itself if the folder cannot be created — still not `/`.
-    public static func isolatedWorkingDirectory(fileManager: FileManager = .default) -> URL {
+    /// Shared with `CodexCLI`, which passes its own folder name.
+    public static func isolatedWorkingDirectory(name: String = "openclip-claude-cli", fileManager: FileManager = .default) -> URL {
         let temp = fileManager.temporaryDirectory
-        let dir = temp.appendingPathComponent("openclip-claude-cli", isDirectory: true)
+        let dir = temp.appendingPathComponent(name, isDirectory: true)
         do {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
             return dir
@@ -411,8 +486,13 @@ extension ClaudeCLI {
     }
 
     /// The first usable candidate from `diskCandidatePaths`, or nil.
-    public static func resolveOnDisk(home: String = NSHomeDirectory(), fileManager: FileManager = .default) -> String? {
-        diskCandidatePaths(home: home).first { isUsableBinary(atPath: $0, fileManager: fileManager) }
+    public static func resolveOnDisk(
+        binaryName: String = binaryName,
+        home: String = NSHomeDirectory(),
+        fileManager: FileManager = .default
+    ) -> String? {
+        diskCandidatePaths(binaryName: binaryName, home: home)
+            .first { isUsableBinary(atPath: $0, fileManager: fileManager) }
     }
 }
 
@@ -458,7 +538,12 @@ extension ClaudeCLI {
     ///
     /// `notFound`, `launchFailed` and `timedOut` are not decidable from a finished invocation —
     /// the caller constructs those.
-    public static func classify(stdout: String, stderr: String, exitStatus: Int32) -> Result<Success, Failure> {
+    public static func classify(
+        stdout: String,
+        stderr: String,
+        exitStatus: Int32,
+        model: String = defaultModel
+    ) -> Result<Success, Failure> {
         if let envelope = parseEnvelope(stdout: stdout) {
             if envelope.isError {
                 let detail = envelope.result.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -484,7 +569,7 @@ extension ClaudeCLI {
             // A miss here is data for the caller's log. It cannot produce a failure.
             return .success(Success(
                 text: text,
-                modelUsage: modelUsageOutcome(envelope.modelUsage),
+                modelUsage: modelUsageOutcome(envelope.modelUsage, model: model),
                 thinkingTokens: envelope.thinkingTokens
             ))
         }

@@ -20,11 +20,15 @@ public final class ClaudeCLIProvider: AIProvider {
     /// move into this type.
     private let resolveBinaryPath: @MainActor () async throws -> String
 
+    /// The wire id sent over `--model`: the user's choice from Provider Settings, or the default.
+    private let model: String
+
     /// Appended to the shared rules block so the model knows where the text is. Not localized: it
     /// is part of the prompt payload, like the model id and the role line.
     static let stdinSentence = "\n\nThe text to transform is provided on standard input."
 
-    public init(resolveBinaryPath: @escaping @MainActor () async throws -> String) {
+    public init(model: String, resolveBinaryPath: @escaping @MainActor () async throws -> String) {
+        self.model = model
         self.resolveBinaryPath = resolveBinaryPath
     }
 
@@ -41,7 +45,8 @@ public final class ClaudeCLIProvider: AIProvider {
                         executableURL: URL(fileURLWithPath: binary),
                         // The rules block every other provider uses, plus the stdin sentence.
                         arguments: ClaudeCLI.arguments(
-                            prompt: AIRequestSupport.systemPrompt(for: prompt) + Self.stdinSentence
+                            prompt: AIRequestSupport.systemPrompt(for: prompt) + Self.stdinSentence,
+                            model: model
                         ),
                         environment: ClaudeCLI.childEnvironment(
                             inherited: ProcessInfo.processInfo.environment,
@@ -70,7 +75,8 @@ public final class ClaudeCLIProvider: AIProvider {
                     switch ClaudeCLI.classify(
                         stdout: output.stdout,
                         stderr: output.stderr,
-                        exitStatus: output.terminationStatus
+                        exitStatus: output.terminationStatus,
+                        model: model
                     ) {
                     case .success(let success):
                         Self.logSuccess(success, exitStatus: output.terminationStatus)
