@@ -22,6 +22,10 @@ public struct AIConfigureForm: View {
 
     @State private var isRedetectingClaudeCLI: Bool = false
 
+    @State private var isRedetectingCodexCLI: Bool = false
+    @State private var isFetchingCodexModels: Bool = false
+    @State private var codexFetchError: String? = nil
+
     public init() {}
 
     public var body: some View {
@@ -42,6 +46,7 @@ public struct AIConfigureForm: View {
                     Text("Cloud API").tag(AIProviderType.cloud.rawValue)
                     Text("Browser").tag(AIProviderType.browser.rawValue)
                     Text("Claude CLI").tag(AIProviderType.claudeCLI.rawValue)
+                    Text("Codex CLI").tag(AIProviderType.codexCLI.rawValue)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -128,44 +133,93 @@ public struct AIConfigureForm: View {
                             .foregroundColor(.red)
                     }
                 } else if aiManager.activeProviderType == .claudeCLI {
-                    // The model is pinned and stated, never picked: a floating alias is exactly what
-                    // the dated pin exists to forbid, so this row is read-only by design.
-                    HStack(spacing: 8) {
-                        Text("Model")
-                        Spacer()
-                        Text(verbatim: ClaudeCLI.model)
-                            .font(.system(.body, design: .monospaced))
+                    // Display names in the picker, the wire id as a caption: the human reads
+                    // "Sonnet 4.5", and what actually goes over `--model` stays visible beside it
+                    // (ADR 0001 §4, as amended). A stored id that is not in the table is folded in
+                    // raw, the way the cloud picker keeps its stored value, so it is never snapped
+                    // to the default behind the user's back.
+                    VStack(alignment: .leading, spacing: 2) {
+                        let wireIDs = ClaudeCLI.models.map(\.wireID)
+                        let choices = wireIDs.contains(aiManager.claudeCLIModel)
+                            ? wireIDs
+                            : wireIDs + [aiManager.claudeCLIModel]
+                        Picker("Model", selection: $aiManager.claudeCLIModel) {
+                            ForEach(choices, id: \.self) { wireID in
+                                Text(verbatim: ClaudeCLI.displayName(for: wireID)).tag(wireID)
+                            }
+                        }
+                        Text(verbatim: aiManager.claudeCLIModel)
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundColor(.secondary)
                             .textSelection(.enabled)
                     }
 
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Command Line Tool")
-                            Text(aiManager.claudeResolutionDetail.isEmpty
-                                 ? String(localized: "Not detected yet.")
-                                 : aiManager.claudeResolutionDetail)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button(action: redetectClaudeCLI) {
-                            if isRedetectingClaudeCLI {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                            }
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Re-detect the Claude Code CLI installation")
-                        .disabled(isRedetectingClaudeCLI)
-                    }
+                    cliToolRow(
+                        detail: aiManager.claudeResolutionDetail,
+                        isBusy: isRedetectingClaudeCLI,
+                        help: "Re-detect the Claude Code CLI installation",
+                        action: redetectClaudeCLI
+                    )
                     // Resolution is lazy, so without this the user would sit on a fourth state
                     // ("Not detected yet.") until they pressed Re-detect or ran a transform. Only
                     // when this branch is on screen — never at app launch.
                     .task {
                         guard aiManager.claudeResolutionDetail.isEmpty else { return }
                         try? await aiManager.resolvedClaudeBinaryPath()
+                    }
+                } else if aiManager.activeProviderType == .codexCLI {
+                    // Mirrors the Claude row: display name in the picker, the slug as a caption.
+                    // The picker is fed by what the installed codex lists (`codex debug models`),
+                    // never a literal in the app; before it loads, or when it fails, the stored
+                    // slug is folded in raw so the choice is never snapped behind the user's back.
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            let wireIDs = aiManager.codexModels.map(\.wireID)
+                            let choices = wireIDs.contains(aiManager.codexModel)
+                                ? wireIDs
+                                : wireIDs + [aiManager.codexModel]
+                            Picker("Model", selection: $aiManager.codexModel) {
+                                ForEach(choices, id: \.self) { wireID in
+                                    Text(verbatim: CodexCLI.displayName(for: wireID, in: aiManager.codexModels)).tag(wireID)
+                                }
+                            }
+
+                            Button(action: fetchCodexModels) {
+                                if isFetchingCodexModels {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Fetch the models the installed Codex CLI lists")
+                            .disabled(isFetchingCodexModels)
+                        }
+                        Text(verbatim: aiManager.codexModel)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    if let codexFetchError {
+                        Text("Query failed: \(codexFetchError)")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+
+                    cliToolRow(
+                        detail: aiManager.codexResolutionDetail,
+                        isBusy: isRedetectingCodexCLI,
+                        help: "Re-detect the Codex CLI installation",
+                        action: redetectCodexCLI
+                    )
+                    // Lazy, like the Claude row: list the catalog only when this branch is on
+                    // screen, never at app launch. The listing resolves the binary first, which
+                    // is what fills the row above.
+                    .task {
+                        if aiManager.codexModels.isEmpty, !isFetchingCodexModels {
+                            fetchCodexModels()
+                        }
                     }
                 } else if aiManager.activeProviderType == .browser {
                     Picker("Default Chatbot", selection: $aiManager.browserPreset) {
@@ -277,6 +331,54 @@ public struct AIConfigureForm: View {
         Task { @MainActor in
             try? await aiManager.redetectClaudeCLI()
             isRedetectingClaudeCLI = false
+        }
+    }
+
+    /// The "Command Line Tool" row both CLI providers show: the resolution verdict, and a
+    /// Re-detect button beside it.
+    @ViewBuilder
+    private func cliToolRow(detail: String, isBusy: Bool, help: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Command Line Tool")
+                Text(detail.isEmpty ? String(localized: "Not detected yet.") : detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button(action: action) {
+                if isBusy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+            }
+            .buttonStyle(.borderless)
+            .help(help)
+            .disabled(isBusy)
+        }
+    }
+
+    private func redetectCodexCLI() {
+        isRedetectingCodexCLI = true
+        Task { @MainActor in
+            try? await aiManager.redetectCodexCLI()
+            isRedetectingCodexCLI = false
+        }
+    }
+
+    /// Lists the catalog the installed codex renders. A failure is shown beside the picker, which
+    /// keeps offering the stored slug so the provider still runs with it.
+    private func fetchCodexModels() {
+        isFetchingCodexModels = true
+        codexFetchError = nil
+        Task { @MainActor in
+            do {
+                try await aiManager.fetchCodexCatalog()
+            } catch {
+                codexFetchError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+            isFetchingCodexModels = false
         }
     }
 }

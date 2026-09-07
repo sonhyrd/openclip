@@ -18,7 +18,7 @@ OpenClip Workspace
 │ ├── Strongly-typed settings engine (SettingsStore, SettingKey)
 │ ├── Application policy rules (AppRule, RuleEngine)
 │ ├── Pure snippet & manifest parsing (OpenClipSnippetParser, ExtensionManifest)
-│ └── Pure AI-provider domain (ClaudeCLI: argument list, envelope, failure taxonomy)
+│ └── Pure AI-provider domain (ClaudeCLI, CodexCLI: argument lists, output classification, failure taxonomies)
 │
 └── OpenClip (macOS Application Target)
  ├── AppKit floating panels & SwiftUI UI (PopupPanel, PopupView, PreferencesView)

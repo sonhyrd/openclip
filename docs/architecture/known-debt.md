@@ -44,7 +44,7 @@ areas; stale debt notes are worse than none.
   path already reads through the injected `optionStore` (`OpenClipJSHost` reads options read-only via
   `ActionOptionReading`); `AppleScriptAction` does not consume options today.
 
-## AI Providers (Claude Code CLI)
+## AI Providers (Claude Code CLI, Codex CLI)
 
 - **Resolved in 1.3.0: cancelling the popup now kills the `claude` child.** Upstream made
   `ShellProcessRunner` consult task cancellation (`ProcessBox` +
@@ -65,6 +65,15 @@ areas; stale debt notes are worse than none.
   exactly once and finishes; the user sees a spinner rather than text arriving progressively. Every
   other non-browser provider streams. Changing this means giving up the envelope (and with it the
   `is_error` signal that classification depends on) for stream-json.
+- **The Codex CLI provider mirrors all three points above** (ADR 0002): `codexBinaryPath` /
+  `codexResolutionDetail` are runtime state, never persisted; `codexModels` (the `codex debug
+  models` listing) is cached per launch for the same reason; the provider is one-shot over `--json`
+  JSONL, yielding once. Codex has no tools-off flag, so the shell tool it always carries is bounded
+  by `-s read-only` and an empty private cwd rather than removed — a gap, named, not a fix waiting
+  to happen.
+- **The Claude CLI strings are translated into zh-Hans only.** The Codex strings and the changed
+  Claude rejection sentence carry all four languages; the rest of the Claude CLI copy from #7/#8
+  still lacks zh-Hant, fr and ja.
 
 ## Action Seams Already Implemented
 

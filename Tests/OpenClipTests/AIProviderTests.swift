@@ -82,6 +82,21 @@ final class AIProviderTests: XCTestCase {
 
         manager.activeProviderType = .browser
         XCTAssertEqual(manager.currentProvider.type, .browser)
+
+        manager.activeProviderType = .claudeCLI
+        XCTAssertEqual(manager.currentProvider.type, .claudeCLI)
+
+        manager.activeProviderType = .codexCLI
+        XCTAssertEqual(manager.currentProvider.type, .codexCLI)
+    }
+
+    func testEveryProviderTypeHasATitleAndTheCLIProvidersAreDistinct() {
+        XCTAssertEqual(AIProviderType.allCases.count, 6)
+        for type in AIProviderType.allCases {
+            XCTAssertFalse(type.title.isEmpty, "\(type) has no title")
+        }
+        XCTAssertEqual(AIProviderType.codexCLI.title, "Codex (local CLI)")
+        XCTAssertNotEqual(AIProviderType.codexCLI.title, AIProviderType.claudeCLI.title)
     }
 
     func testEffectiveBrowserURLTemplatePresets() {
