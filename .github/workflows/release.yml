@@ -53,11 +53,30 @@ jobs:
         run: brew install xcodegen
 
       - name: Fetch Sparkle tools
+        env:
+          # api.github.com is 60 requests/hour PER IP when unauthenticated, and GitHub-hosted
+          # runners share their egress IPs — so this call was rate-limited by strangers, not by us.
+          # Authenticated it is 1000/hour against this repository. `github.token` is minted per run
+          # and needs no secret; the Sparkle repo is public, so read access is all this uses.
+          GH_TOKEN: ${{ github.token }}
         run: |
-          URL=$(curl -sL https://api.github.com/repos/sparkle-project/Sparkle/releases/latest \
+          set -euo pipefail
+          # -f so an HTTP error is a non-zero exit rather than an error document piped into `grep`,
+          # and -S so the reason is printed. `-s` alone hid the 403 that caused the release to fail
+          # three runs in a row with an unrelated-looking error further down.
+          URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              https://api.github.com/repos/sparkle-project/Sparkle/releases/latest \
             | grep -o 'https://[^"]*\.tar\.xz' | head -1)
+          # An empty URL must stop here and say why. Without this the failure surfaced at the `cp`
+          # below as a missing file, which names the symptom and hides the cause.
+          if [ -z "$URL" ]; then
+            echo "::error::Could not resolve a Sparkle .tar.xz from the latest release payload."
+            exit 1
+          fi
+          echo "Sparkle tools: $URL"
           mkdir -p scripts/bin /tmp/sparkle
-          curl -sL "$URL" | tar xJ -C /tmp/sparkle
+          curl -fsSL "$URL" | tar xJ -C /tmp/sparkle
           cp /tmp/sparkle/bin/generate_appcast /tmp/sparkle/bin/sign_update scripts/bin/
           chmod +x scripts/bin/generate_appcast scripts/bin/sign_update
 
