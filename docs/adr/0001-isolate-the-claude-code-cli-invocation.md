@@ -1,6 +1,6 @@
 # ADR 0001 — Isolate the Claude Code CLI invocation
 
-- **Status:** Accepted
+- **Status:** Superseded by [#29](https://github.com/sonhyrd/openclip/issues/29) — the fork adopted upstream's `CLIProvider` (`Sources/OpenClip/AI/Providers/CLIProvider.swift`); only the empty private cwd survives.
 - **Date:** 2026-09-03
 - **Context:** [#1](https://github.com/sonhyrd/openclip/issues/1) (plan), [#2](https://github.com/sonhyrd/openclip/issues/2) (spec), [#9](https://github.com/sonhyrd/openclip/issues/9) (this record)
 - **Shipped in:** [`Sources/Core/AI/ClaudeCLI.swift`](../../Sources/Core/AI/ClaudeCLI.swift), [`Sources/OpenClip/AI/Providers/ClaudeCLIProvider.swift`](../../Sources/OpenClip/AI/Providers/ClaudeCLIProvider.swift), [`Sources/OpenClip/AI/AIServiceManager.swift`](../../Sources/OpenClip/AI/AIServiceManager.swift), [`Sources/Core/Extensions/ShellProcessRunner.swift`](../../Sources/Core/Extensions/ShellProcessRunner.swift)

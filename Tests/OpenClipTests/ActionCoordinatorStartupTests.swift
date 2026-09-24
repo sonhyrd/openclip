@@ -5,12 +5,20 @@ import XCTest
 final class ActionCoordinatorStartupTests: XCTestCase {
     let packageID = "com.custom.startup.test"
     var tempDir: URL!
+    /// `ActionRegistry.shared` is built on `DefaultSettingsStore.shared`, i.e. the *real* app
+    /// preferences domain — the test host shares its bundle id with OpenClip. `unregister` prunes
+    /// `action.order` against whatever the registry currently holds, so unregistering here used to
+    /// rewrite (and with a near-empty test registry, wipe) the developer's own action order.
+    /// Snapshot the key and put it back.
+    private var savedActionOrder: [String] = []
     
     override func setUp() async throws {
         try await super.setUp()
-        await MainActor.run {
+        savedActionOrder = await MainActor.run { () -> [String] in
+            let saved = DefaultSettingsStore.shared.get(.actionOrder)
             TestIsolation.reset()
             ExtensionManager.shared.actionFactory = DefaultActionFactory()
+            return saved
         }
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -18,9 +26,11 @@ final class ActionCoordinatorStartupTests: XCTestCase {
     
     override func tearDown() async throws {
         let pid = packageID
+        let restoredOrder = savedActionOrder
         await MainActor.run {
             ActionRegistry.shared.unregister(actionID: pid)
             ExtensionManager.shared.actionFactory = nil
+            DefaultSettingsStore.shared.set(.actionOrder, value: restoredOrder)
         }
         if let tempDir = tempDir {
             try? FileManager.default.removeItem(at: tempDir)

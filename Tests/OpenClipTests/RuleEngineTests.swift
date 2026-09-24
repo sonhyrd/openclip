@@ -55,7 +55,8 @@ final class RuleEngineTests: XCTestCase {
         }
         """.data(using: .utf8)!
         
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_test.json")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try json.write(to: tempURL)
         
         await RuleEngine.shared.loadRules(from: tempURL)
@@ -77,8 +78,6 @@ final class RuleEngineTests: XCTestCase {
         // Test macro
         let menuCopyContext = RuleEngine.shared.resolvePolicies(for: "com.apple.Terminal")
         XCTAssertEqual(menuCopyContext.denyPaste, true)
-        
-        try FileManager.default.removeItem(at: tempURL)
     }
 
     @MainActor
@@ -111,7 +110,8 @@ final class RuleEngineTests: XCTestCase {
         }
         """.data(using: .utf8)!
         
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_legacy_test.json")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_legacy_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try json.write(to: tempURL)
         
         await RuleEngine.shared.loadRules(from: tempURL)
@@ -119,8 +119,6 @@ final class RuleEngineTests: XCTestCase {
         let context = RuleEngine.shared.resolvePolicies(for: "com.legacy.app")
         XCTAssertTrue(context.useMenuCopy)
         XCTAssertEqual(context.retrievalMode, .menuCopy, "Legacy use-menu-copy: true should alias to .menuCopy")
-        
-        try FileManager.default.removeItem(at: tempURL)
     }
 
     @MainActor
@@ -137,7 +135,8 @@ final class RuleEngineTests: XCTestCase {
         }
         """.data(using: .utf8)!
 
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_legacy_explicit_test.json")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_legacy_explicit_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try json.write(to: tempURL)
 
         await RuleEngine.shared.loadRules(from: tempURL)
@@ -145,8 +144,6 @@ final class RuleEngineTests: XCTestCase {
         let context = RuleEngine.shared.resolvePolicies(for: "com.legacy.explicit")
         XCTAssertTrue(context.useMenuCopy)
         XCTAssertEqual(context.retrievalMode, .axTextControl, "explicit ax-text-control must opt out of the legacy menu-copy alias")
-
-        try FileManager.default.removeItem(at: tempURL)
     }
 
     @MainActor
@@ -162,15 +159,14 @@ final class RuleEngineTests: XCTestCase {
         }
         """.data(using: .utf8)!
         
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_retrieval_mode_test.json")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_retrieval_mode_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try json.write(to: tempURL)
         
         await RuleEngine.shared.loadRules(from: tempURL)
         
         let context = RuleEngine.shared.resolvePolicies(for: "com.test.browser")
         XCTAssertEqual(context.retrievalMode, .browserScript, "retrieval-mode: browser-script should resolve for a matching bundle")
-        
-        try FileManager.default.removeItem(at: tempURL)
     }
 
     @MainActor
@@ -223,7 +219,8 @@ final class RuleEngineTests: XCTestCase {
         }
         """.data(using: .utf8)!
         
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_gate_test.json")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_gate_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try json.write(to: tempURL)
         
         await RuleEngine.shared.loadRules(from: tempURL)
@@ -233,8 +230,6 @@ final class RuleEngineTests: XCTestCase {
         
         let defaultContext = RuleEngine.shared.resolvePolicies(for: "com.random.app")
         XCTAssertEqual(defaultContext.gate, .default, "Apps with no gate rule keep the default gate")
-        
-        try FileManager.default.removeItem(at: tempURL)
     }
 
     @MainActor
@@ -254,7 +249,8 @@ final class RuleEngineTests: XCTestCase {
         }
         """.data(using: .utf8)!
         
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_disabled_hotkey_test.json")
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("rules_disabled_hotkey_test_\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try json.write(to: tempURL)
         
         await RuleEngine.shared.loadRules(from: tempURL)
@@ -270,7 +266,5 @@ final class RuleEngineTests: XCTestCase {
         let randomContext = RuleEngine.shared.resolvePolicies(for: "com.random.app")
         XCTAssertFalse(randomContext.disabled)
         XCTAssertFalse(randomContext.hotkeyOnly)
-        
-        try FileManager.default.removeItem(at: tempURL)
     }
 }

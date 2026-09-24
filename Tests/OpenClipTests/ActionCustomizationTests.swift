@@ -109,4 +109,75 @@ final class ActionCustomizationTests: XCTestCase {
         manager.setOverride(for: "builtin.copy", title: nil, symbol: "sparkles", text: nil)
         XCTAssertEqual(manager.tableIcon(for: builtinTextAction), .symbol("sparkles"))
     }
+
+    func testTableIconForDecoratedAndCustomActions() {
+        let manager = ActionCustomizationManager(settingsStore: MemorySettingsStore())
+
+        // Custom action (shell script, text snippet, web search) with custom symbol icon
+        let customAction = CustomAction(
+            id: "com.example.leafy.lookup",
+            title: "Look up",
+            iconName: "leaf.fill",
+            type: .shellScript(script: "echo ok", replaceSelection: false)
+        )
+        XCTAssertEqual(manager.tableIcon(for: customAction), .symbol("leaf.fill"))
+
+        // Decorated with delivery (e.g. toast / secondary)
+        let deliveryDecorated = DeliveryDecoratedAction(
+            base: customAction,
+            delivery: ActionDelivery(primaryToast: StatusFeedback(message: "Done", style: .success))
+        )
+        XCTAssertEqual(manager.tableIcon(for: deliveryDecorated), .symbol("leaf.fill"))
+
+        // Decorated with keywords
+        let keywordDecorated = KeywordDecoratedAction(
+            base: customAction,
+            keywords: ["lookup", "search"]
+        )
+        XCTAssertEqual(manager.tableIcon(for: keywordDecorated), .symbol("leaf.fill"))
+
+        // Decorated with menu relevance
+        let menuDecorated = MenuDecoratedAction(
+            base: customAction,
+            menuRelevanceRegex: ".*"
+        )
+        XCTAssertEqual(manager.tableIcon(for: menuDecorated), .symbol("leaf.fill"))
+
+        // Multi-nested decorations (as produced by DefaultActionFactory.decorate)
+        let multiDecorated = MenuDecoratedAction(
+            base: DeliveryDecoratedAction(
+                base: KeywordDecoratedAction(base: customAction, keywords: ["leafy"]),
+                delivery: ActionDelivery(primaryToast: StatusFeedback(message: "Looked up", style: .success))
+            ),
+            menuRelevanceRegex: ".*"
+        )
+        XCTAssertEqual(manager.tableIcon(for: multiDecorated), .symbol("leaf.fill"))
+
+        // URLTemplateAction decorated
+        let urlAction = URLTemplateAction(
+            id: "com.example.leafy.translate",
+            title: "Translate",
+            icon: .symbol("globe"),
+            urlTemplate: "https://example.com"
+        )
+        let decoratedURLAction = DeliveryDecoratedAction(
+            base: urlAction,
+            delivery: ActionDelivery(primaryToast: StatusFeedback(message: "Translating", style: .info))
+        )
+        XCTAssertEqual(manager.tableIcon(for: decoratedURLAction), .symbol("globe"))
+
+        // ScriptAction decorated
+        let scriptAction = ScriptAction(
+            id: "com.example.leafy.save",
+            title: "Save",
+            icon: .symbol("bookmark.fill"),
+            scriptURL: URL(fileURLWithPath: "/tmp/save.sh")
+        )
+        let decoratedScriptAction = DeliveryDecoratedAction(
+            base: scriptAction,
+            delivery: ActionDelivery(primaryToast: StatusFeedback(message: "Saved", style: .success))
+        )
+        XCTAssertEqual(manager.tableIcon(for: decoratedScriptAction), .symbol("bookmark.fill"))
+    }
 }
+

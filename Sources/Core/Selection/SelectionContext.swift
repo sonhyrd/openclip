@@ -17,18 +17,21 @@ public struct SelectionContext: Sendable {
     public let isClipboardFallback: Bool
     public let html: String?
     public let rtf: String?
-    
+    /// Raw pasteboard representations captured alongside the text, including app-private types.
+    public let flavors: [RichPasteboardFlavor]
+
     public init(
         text: String,
-        sourceApp: AppIdentity,
-        cursorPosition: CGPoint,
+        sourceApp: AppIdentity = AppIdentity(bundleIdentifier: "com.openclip.unknown", localizedName: "Unknown"),
+        cursorPosition: CGPoint = .zero,
         mouseDownLocation: CGPoint? = nil,
         selectionBounds: CGRect? = nil,
-        timestamp: Date,
-        appPolicy: AppPolicyContext,
+        timestamp: Date = Date(),
+        appPolicy: AppPolicyContext = .default,
         isClipboardFallback: Bool = false,
         html: String? = nil,
-        rtf: String? = nil
+        rtf: String? = nil,
+        flavors: [RichPasteboardFlavor] = []
     ) {
         self.text = text
         self.sourceApp = sourceApp
@@ -40,5 +43,6 @@ public struct SelectionContext: Sendable {
         self.isClipboardFallback = isClipboardFallback
         self.html = html
         self.rtf = rtf
+        self.flavors = flavors
     }
 }

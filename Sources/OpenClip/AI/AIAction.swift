@@ -47,9 +47,13 @@ public struct AIAction: Action {
         self.title = title
     }
 
+    /// Off when AI is switched off wholesale, or when this preset's own toggle in AI settings is
+    /// off — the palette and every other surface gate on this, so a disabled preset is offered
+    /// nowhere.
     @MainActor
     public func isEnabled(for context: ActionContext) -> Bool {
-        preset()?.isEnabled ?? false
+        guard AIServiceManager.shared.isAIEnabled else { return false }
+        return preset()?.isEnabled ?? false
     }
 
     /// Defensive fallback for any non-palette caller (the palette routes `.ai` through the AI

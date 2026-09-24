@@ -13,7 +13,7 @@ import Foundation
 import AppKit
 import Core
 
-public struct NamedServiceAction: Action {
+public struct NamedServiceAction: ConfigurableAction, ActionWithRules {
     public let id: String
     public let title: String
     public let icon: ActionIcon

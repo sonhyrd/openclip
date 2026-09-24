@@ -6,7 +6,7 @@ import AppKit
 import Foundation
 import Core
 
-public struct CompletionAction: WordCompletionProviding {
+public struct CompletionAction: ConfigurableAction, WordCompletionProviding {
     public let id = "builtin.completion"
     public var title: String { String(localized: "Word Completion") }
     public var icon: ActionIcon { .symbol("text.badge.plus") }

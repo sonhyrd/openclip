@@ -5,7 +5,7 @@
 // Conforms to Action and SubActionProviding, resolving subactions from the catalog by canonical ID.
 import Foundation
 
-public struct CustomGroupAction: Action, SubActionProviding, Sendable {
+public struct CustomGroupAction: ConfigurableAction, SubActionProviding, Sendable {
     public let id: String
     public let title: String
     public let icon: ActionIcon
@@ -15,7 +15,7 @@ public struct CustomGroupAction: Action, SubActionProviding, Sendable {
     public init(id: String, title: String, iconName: String, memberActionIDs: [String]) {
         self.id = id
         self.title = title
-        self.icon = .symbol(iconName)
+        self.icon = ActionIcon.resolve(from: iconName)
         self.chrome = ActionChrome(
             badge: .none,
             rowStyle: .actionGroup,

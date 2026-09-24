@@ -2,6 +2,8 @@
 // OpenClip
 //
 // Renders the application rules preferences tab for managing app exclusion rules and application-specific settings.
+// Styled with inset SettingsCards.
+
 import SwiftUI
 import AppKit
 import Core
@@ -9,68 +11,49 @@ import Core
 @MainActor
 public struct AppRulesTab: View {
     @ObservedObject private var ruleEngine = RuleEngine.shared
-    @State private var showingAppPicker = false
-    
+
     public init() {}
-    
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Application Rules")
-                        .font(.headline)
-                    Text("Configure per-app trigger and paste behavior.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                
-                Button(action: {
-                    showingAppPicker = true
-                }) {
-                    Label("Add Application", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-            
-            Form {
-                Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsCard("Application Rules") {
                     if ruleEngine.userRules.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "app.badge.checkmark")
-                                .font(.system(size: 32))
-                                .foregroundColor(.secondary)
-                            Text("No App Rules Configured")
-                                .font(.headline)
-                            Text("OpenClip works in all applications by default. Click 'Add Application' to configure per-app rules or exclusions.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                        ContentUnavailableView {
+                            Label("No App Rules Configured", systemImage: "shield")
+                        } description: {
+                            Text("OpenClip works in all applications by default. Add an application to configure per-app rules or exclusions.")
                                 .multilineTextAlignment(.center)
+                        } actions: {
+                            Button("Add Application") { SettingsRouter.shared.push(.addApplication) }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 30)
+                        .padding(.vertical, 24)
                     } else {
-                        ForEach(ruleEngine.userRules) { rule in
+                        ForEach(Array(ruleEngine.userRules.enumerated()), id: \.element.id) { index, rule in
+                            if index > 0 {
+                                SettingsDivider(insetLeading: 56)
+                            }
                             AppRuleRowView(rule: rule) { updatedRule in
                                 RuleEngine.shared.addOrUpdateRule(updatedRule)
                             } onDelete: {
                                 RuleEngine.shared.removeRule(id: rule.id)
                             }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
                         }
                     }
                 }
+
+                Text("Configure per-app trigger and paste behavior.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 4)
             }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
         }
-        .padding(12)
-        .sheet(isPresented: $showingAppPicker) {
-            AppPickerSheet { bundleID in
-                let newRule = AppRule(bundleIdentifiers: [bundleID])
-                RuleEngine.shared.addOrUpdateRule(newRule)
-            }
-        }
+        .scrollIndicators(.hidden)
     }
 }
 
@@ -79,25 +62,25 @@ private struct AppRuleRowView: View {
     let rule: AppRule
     let onUpdate: (AppRule) -> Void
     let onDelete: () -> Void
-    
+
     private var bundleID: String {
         rule.bundleIdentifiers.first ?? String(localized: "Unknown App")
     }
-    
+
     private var isDisabled: Bool {
         rule.disabled == true
     }
-    
+
     private var isHotkeyOnly: Bool {
         rule.hotkeyOnly == true
     }
-    
+
     private var isPasteDenied: Bool {
         rule.denyPaste == true
     }
-    
+
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 12) {
             // App Icon
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path))
@@ -110,27 +93,25 @@ private struct AppRuleRowView: View {
                     .foregroundColor(.secondary)
                     .opacity(isDisabled ? 0.5 : 1.0)
             }
-            
+
             // App Title & Bundle ID
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
                    let bundle = Bundle(url: appURL),
                    let appName = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String {
                     Text(appName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(isDisabled ? .secondary : .primary)
+                        .foregroundStyle(isDisabled ? .secondary : .primary)
                     Text(bundleID)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 } else {
                     Text(bundleID)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(isDisabled ? .secondary : .primary)
+                        .foregroundStyle(isDisabled ? .secondary : .primary)
                 }
             }
-            
+
             Spacer()
-            
+
             // Disable Toggle
             Toggle("", isOn: Binding(
                 get: { !isDisabled },
@@ -149,9 +130,8 @@ private struct AppRuleRowView: View {
             ))
             .labelsHidden()
             .toggleStyle(.switch)
-            .controlSize(.mini)
             .accessibilityLabel(isDisabled ? String(localized: "Enable in this app") : String(localized: "Disable in this app"))
-            
+
             // Three-Dots (...) Actions Menu
             Menu {
                 Button {
@@ -172,7 +152,7 @@ private struct AppRuleRowView: View {
                         Text("Hotkey Only")
                     }
                 }
-                
+
                 Button {
                     let updated = AppRule(
                         bundleIdentifiers: rule.bundleIdentifiers,
@@ -191,16 +171,15 @@ private struct AppRuleRowView: View {
                         Text("Copy Result Only")
                     }
                 }
-                
+
                 Divider()
-                
+
                 Button(role: .destructive, action: onDelete) {
                     Label("Remove Rule", systemImage: "trash")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 15))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -208,6 +187,6 @@ private struct AppRuleRowView: View {
             .help("More Actions")
             .accessibilityLabel("More Actions")
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
     }
 }

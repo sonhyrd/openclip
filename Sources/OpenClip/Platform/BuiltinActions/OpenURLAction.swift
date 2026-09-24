@@ -8,7 +8,7 @@ import AppKit
 #endif
 import Core
 
-public struct OpenURLAction: Action {
+public struct OpenURLAction: ConfigurableAction {
     public let id = "builtin.openurl"
     public var title: String { String(localized: "Open Link") }
     public let icon = ActionIcon.symbol("link")
@@ -23,6 +23,10 @@ public struct OpenURLAction: Action {
     @MainActor
     public func perform(_ context: ActionContext) async throws -> ActionResult {
         if let url = extractURL(from: context.selection.text) {
+            let sourceBundleID = context.selection.sourceApp.bundleIdentifier
+            if BrowserDetector.isBrowser(bundleIdentifier: sourceBundleID), let sourceBundleID {
+                return .openURLInApp(url: url, appBundleIdentifier: sourceBundleID)
+            }
             return .openURL(url)
         }
         return .failure(NSError(

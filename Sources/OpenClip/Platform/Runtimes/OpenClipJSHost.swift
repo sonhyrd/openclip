@@ -16,9 +16,9 @@
 // get a `fetch(url, options)` polyfill bridged to URLSession (GET/POST with JSON bodies; responses
 // expose `{ status, ok, text(), json() }`) and a promise bridge: the wrapped entry point attaches
 // `.then`/catch handlers that settle a PromiseState, and the host pumps the thread's runloop until
-// the promise settles. A watchdog (TimeoutFlag pattern from ShellProcessRunner) invalidates the
-// context and throws after `Constants.scriptTimeout`. Synchronous extensions keep the exact legacy
-// wrapped-script shape and immediate-result behavior.
+// the promise settles. A JavaScriptCore VM execution limit interrupts synchronous JavaScript, while
+// a TimeoutFlag watchdog bounds idle promise waiting; both throw after `Constants.scriptTimeout`.
+// Synchronous extensions keep the exact legacy wrapped-script shape and immediate-result behavior.
 import Foundation
 import JavaScriptCore
 import Core
@@ -146,6 +146,9 @@ public final class OpenClipJSHost: @unchecked Sendable {
         public var shortcutName: String?
         public var notification: (title: String, body: String)?
         public var shareService: (identifier: String, text: String)?
+        public var file: FileOutputPayload?
+        public var copyFile: URL?
+        public var saveFile: URL?
         public var returnValue: String?
 
         public init() {}
@@ -159,10 +162,14 @@ public final class OpenClipJSHost: @unchecked Sendable {
         case copyContent(RichPasteboardPayload)
         case cut(String)
         case openURL(URL)
+        case file(FileOutputPayload)
+        case copyFile(URL)
+        case saveFile(URL)
         case keyPress(KeyPressSpec)
         case runShortcut(name: String, input: String?)
         case notify(title: String, body: String)
         case shareService(identifier: String, text: String)
+        case toast(StatusFeedback)
     }
 
     /// Result of one JS evaluation: collected effects, any JS exception, and the value resolved from
@@ -185,10 +192,9 @@ public final class OpenClipJSHost: @unchecked Sendable {
     public func run(_ request: Request) async throws -> ActionResult {
         let session = self.session
 
-        // Synchronous evaluations (and the top-level synchronous parsing/execution phase of async
-        // scripts) cannot be interrupted once started (JSVirtualMachine.invalidate is gone in modern
-        // SDKs), so a CPU-bound sync script permanently parks a cooperative-pool thread. Cap in-flight
-        // sync evaluations and refuse new ones at the cap, logging at .error.
+        // Every run enters the gate because async scripts also have a top-level synchronous phase.
+        // JavaScriptCore's execution limit forcibly ends a CPU-bound phase, allowing the detached
+        // task's defer to release this slot after timeout.
         let gate = OpenClipJSHost.syncEvaluationGate
         guard gate.tryEnter() else {
             Log.js.error("Refusing JS evaluation for action \(request.actionID, privacy: .public): \(gate.inFlightCount) in-flight sync evaluations at cap")
@@ -208,6 +214,8 @@ public final class OpenClipJSHost: @unchecked Sendable {
         return try await withTaskCancellationHandler {
             try await Task.detached {
                 defer { gate.leave() }
+                // End the evaluation on this thread before the thread returns to the pool.
+                defer { fetchTasks.finish() }
                 return try OpenClipJSHost.execute(
                     request,
                     session: session,
@@ -240,6 +248,7 @@ public final class OpenClipJSHost: @unchecked Sendable {
         return makeActionResult(evaluation, request: request)
     }
 
+    /// Evaluates JavaScript with the OpenClip bridge and captures its return value and effects.
     private static func evaluate(
         _ request: Request,
         session: URLSession,
@@ -250,18 +259,26 @@ public final class OpenClipJSHost: @unchecked Sendable {
         let matchedText = request.context.match?.matchedText ?? text
         let captures = request.context.match?.captures ?? []
 
+        let timeoutSeconds = max(0.001, request.timeout ?? Constants.scriptTimeout)
+        let timeoutFlag = TimeoutFlag()
+
         guard let jsContext = JSContext() else {
             throw NSError(domain: Constants.actionErrorDomain,
                           code: Constants.actionErrorCode,
                           userInfo: [NSLocalizedDescriptionKey: "Could not create JavaScript context"])
         }
 
-        let timeoutSeconds = request.timeout ?? Constants.scriptTimeout
-        let timeoutFlag = TimeoutFlag()
-        // Watchdog: marks the timeout flag after the execution budget (matching ShellProcessRunner).
-        // The async pump loop below observes the flag and throws, interrupting a never-settling
-        // promise. (JSVirtualMachine.invalidate() — the old way to abort runaway scripts — was
-        // removed from modern SDKs, so the flag + pump-loop check is the interruption mechanism.)
+        // Install the VM limit before evaluating any script so runaway synchronous code is
+        // interrupted inside JavaScriptCore rather than observed only after evaluateScript returns.
+        let executionLimit = JSExecutionTimeLimit(
+            context: jsContext,
+            timeout: timeoutSeconds,
+            timeoutFlag: timeoutFlag
+        )
+        defer { executionLimit.clear() }
+
+        // The VM limit only runs while JavaScript is executing. This wall-clock watchdog separately
+        // bounds an async promise that is idle while the runloop waits for settlement.
         let watchdog = Task.detached {
             try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
             timeoutFlag.markTimedOut()
@@ -365,6 +382,40 @@ public final class OpenClipJSHost: @unchecked Sendable {
         let requireConfigurationBlock: @convention(block) (JSValue) -> Void = { value in
             collected.value.configuration = Self.parseConfiguration(value, actionID: request.actionID)
         }
+        let fileBlock: @convention(block) (JSValue, JSValue?) -> Void = { inputVal, optsVal in
+            guard let payload = Self.parseFilePayload(inputVal, options: optsVal) else {
+                effects.value.append(.toast(StatusFeedback(message: String(localized: "File not found"), style: .error)))
+                return
+            }
+            let action = Self.parseFileAction(inputVal, options: optsVal)
+            switch action {
+            case "copy", "copyfile":
+                collected.value.copyFile = payload.url
+                effects.value.append(.copyFile(payload.url))
+            case "save", "savefile":
+                collected.value.saveFile = payload.url
+                effects.value.append(.saveFile(payload.url))
+            default:
+                collected.value.file = payload
+                effects.value.append(.file(payload))
+            }
+        }
+        let copyFileBlock: @convention(block) (JSValue) -> Void = { inputVal in
+            if let url = Self.parseURLFromJS(inputVal) {
+                collected.value.copyFile = url
+                effects.value.append(.copyFile(url))
+            } else {
+                effects.value.append(.toast(StatusFeedback(message: String(localized: "File not found"), style: .error)))
+            }
+        }
+        let saveFileBlock: @convention(block) (JSValue) -> Void = { inputVal in
+            if let url = Self.parseURLFromJS(inputVal) {
+                collected.value.saveFile = url
+                effects.value.append(.saveFile(url))
+            } else {
+                effects.value.append(.toast(StatusFeedback(message: String(localized: "File not found"), style: .error)))
+            }
+        }
 
         openclip.setObject(pasteBlock, forKeyedSubscript: "paste" as NSString)
         openclip.setObject(copyBlock, forKeyedSubscript: "copy" as NSString)
@@ -372,6 +423,9 @@ public final class OpenClipJSHost: @unchecked Sendable {
         openclip.setObject(copyContentBlock, forKeyedSubscript: "copyContent" as NSString)
         openclip.setObject(cutBlock, forKeyedSubscript: "cut" as NSString)
         openclip.setObject(openURLBlock, forKeyedSubscript: "openURL" as NSString)
+        openclip.setObject(fileBlock, forKeyedSubscript: "file" as NSString)
+        openclip.setObject(copyFileBlock, forKeyedSubscript: "copyFile" as NSString)
+        openclip.setObject(saveFileBlock, forKeyedSubscript: "saveFile" as NSString)
         openclip.setObject(keyPressBlock, forKeyedSubscript: "keyPress" as NSString)
         openclip.setObject(runShortcutBlock, forKeyedSubscript: "runShortcut" as NSString)
         openclip.setObject(notifyBlock, forKeyedSubscript: "notify" as NSString)
@@ -463,9 +517,31 @@ public final class OpenClipJSHost: @unchecked Sendable {
                 let message = rejected.toString() ?? "JavaScript promise rejected"
                 return EvaluationResult(collected: collected.value, effects: effects.value, exceptionMessage: message, asyncReturnValue: nil)
             }
-            let resolved = promiseState.resolvedValue.flatMap { value in
+            if let resolvedVal = promiseState.resolvedValue, resolvedVal.isObject {
+                if let typeVal = resolvedVal.objectForKeyedSubscript("type"), typeVal.isString {
+                    let typeStr = (typeVal.toString() ?? "").lowercased()
+                    if typeStr == "file" || typeStr == "copyfile" || typeStr == "savefile" {
+                        if effects.value.isEmpty {
+                            if let payload = parseFilePayload(resolvedVal, options: nil) {
+                                let fileAction = parseFileAction(resolvedVal, options: nil)
+                                if typeStr == "copyfile" || fileAction == "copy" || fileAction == "copyfile" {
+                                    effects.value.append(.copyFile(payload.url))
+                                } else if typeStr == "savefile" || fileAction == "save" || fileAction == "savefile" {
+                                    effects.value.append(.saveFile(payload.url))
+                                } else {
+                                    effects.value.append(.file(payload))
+                                }
+                            } else {
+                                effects.value.append(.toast(StatusFeedback(message: String(localized: "File not found"), style: .error)))
+                            }
+                        }
+                    }
+                }
+            }
+            let resolved = promiseState.resolvedValue.flatMap { (value: JSValue) -> String? in
+                if value.isObject { return nil }
                 let string = value.toString() ?? ""
-                return (string.isEmpty || string == "undefined" || string == "null") ? nil : string
+                return (string.isEmpty || string == "undefined" || string == "null" || string == "[object Object]") ? nil : string
             }
             return EvaluationResult(collected: collected.value, effects: effects.value, exceptionMessage: nil, asyncReturnValue: resolved)
         }
@@ -473,7 +549,27 @@ public final class OpenClipJSHost: @unchecked Sendable {
         // Sync path: a promise-like return cannot be awaited in legacy mode, so it is ignored
         // rather than pasted as "[object Promise]".
         if let result = jsResult, !isPromiseLike(result) {
-            if let resultString = result.toString(), resultString != "undefined", resultString != "null" {
+            if result.isObject {
+                if let typeVal = result.objectForKeyedSubscript("type"), typeVal.isString {
+                    let typeStr = (typeVal.toString() ?? "").lowercased()
+                    if typeStr == "file" || typeStr == "copyfile" || typeStr == "savefile" {
+                        if effects.value.isEmpty {
+                            if let payload = parseFilePayload(result, options: nil) {
+                                let fileAction = parseFileAction(result, options: nil)
+                                if typeStr == "copyfile" || fileAction == "copy" || fileAction == "copyfile" {
+                                    effects.value.append(.copyFile(payload.url))
+                                } else if typeStr == "savefile" || fileAction == "save" || fileAction == "savefile" {
+                                    effects.value.append(.saveFile(payload.url))
+                                } else {
+                                    effects.value.append(.file(payload))
+                                }
+                            } else {
+                                effects.value.append(.toast(StatusFeedback(message: String(localized: "File not found"), style: .error)))
+                            }
+                        }
+                    }
+                }
+            } else if let resultString = result.toString(), resultString != "undefined", resultString != "null", resultString != "[object Object]" {
                 collected.value.returnValue = resultString
             }
         }
@@ -701,11 +797,21 @@ public final class OpenClipJSHost: @unchecked Sendable {
         \(scriptCode)
         (function() {
             var __entry;
-            if (typeof module.exports === 'function') __entry = module.exports;
-            else if (typeof module.exports.action === 'function') __entry = module.exports.action;
-            else if (typeof module.exports.main === 'function') __entry = module.exports.main;
-            else if (typeof action === 'function') __entry = action;
-            else if (typeof main === 'function') __entry = main;
+            if (typeof module.exports === 'function') {
+                if (typeof action === 'function' && module.exports !== action && module.exports.name !== 'action') {
+                    __entry = action;
+                } else {
+                    __entry = module.exports;
+                }
+            } else if (typeof module.exports.action === 'function') {
+                __entry = module.exports.action;
+            } else if (typeof module.exports.main === 'function') {
+                __entry = module.exports.main;
+            } else if (typeof action === 'function') {
+                __entry = action;
+            } else if (typeof main === 'function') {
+                __entry = main;
+            }
             if (__entry) return __entry(selection, options);
             return null;
         })();
@@ -740,11 +846,21 @@ public final class OpenClipJSHost: @unchecked Sendable {
         \(scriptCode)
         (function() {
             var __entry;
-            if (typeof module.exports === 'function') __entry = module.exports;
-            else if (typeof module.exports.action === 'function') __entry = module.exports.action;
-            else if (typeof module.exports.main === 'function') __entry = module.exports.main;
-            else if (typeof action === 'function') __entry = action;
-            else if (typeof main === 'function') __entry = main;
+            if (typeof module.exports === 'function') {
+                if (typeof action === 'function' && module.exports !== action && module.exports.name !== 'action') {
+                    __entry = action;
+                } else {
+                    __entry = module.exports;
+                }
+            } else if (typeof module.exports.action === 'function') {
+                __entry = module.exports.action;
+            } else if (typeof module.exports.main === 'function') {
+                __entry = module.exports.main;
+            } else if (typeof action === 'function') {
+                __entry = action;
+            } else if (typeof main === 'function') {
+                __entry = main;
+            }
             if (__entry) return __openclip_dispatch(__entry, selection, options);
             openclip.__resolve(null);
             return null;
@@ -780,6 +896,7 @@ public final class OpenClipJSHost: @unchecked Sendable {
 
     // MARK: - Effect → ActionResult
 
+    /// Converts one completed JavaScript evaluation into the result delivered by the action.
     private static func makeActionResult(_ evaluation: EvaluationResult, request: Request) -> ActionResult {
         let collected = evaluation.collected
 
@@ -807,8 +924,12 @@ public final class OpenClipJSHost: @unchecked Sendable {
             let mapped = effects.map { effectResult($0, input: input) }
             raw = mapped.count == 1 ? mapped[0] : .sequence(mapped)
         } else if let returnValue = evaluation.asyncReturnValue ?? collected.returnValue {
-            // raw = .text(returnValue) — implicitly returned text, governed by the user's per-click preference
-            raw = .text(returnValue)
+            // Check if string return is a path to an existing regular file; otherwise .text(returnValue)
+            if let fileResult = ShellResultMapper.detectFileResult(from: returnValue) {
+                raw = fileResult
+            } else {
+                raw = .text(returnValue)
+            }
         } else {
             raw = .success
         }
@@ -816,6 +937,7 @@ public final class OpenClipJSHost: @unchecked Sendable {
         return raw
     }
 
+    /// Converts a collected JavaScript bridge effect into a domain action result.
     private static func effectResult(_ effect: Effect, input: String) -> ActionResult {
         switch effect {
         case .paste(let text): return .paste(text)
@@ -824,10 +946,14 @@ public final class OpenClipJSHost: @unchecked Sendable {
         case .copyContent(let payload): return .copyContent(payload)
         case .cut(let text): return .cut(text)
         case .openURL(let url): return .openURL(url)
+        case .file(let payload): return .file(payload)
+        case .copyFile(let url): return .copyFile(url)
+        case .saveFile(let url): return .saveFile(url)
         case .keyPress(let spec): return .keyPress(spec)
         case .runShortcut(let name, let inputOverride): return .runShortcut(name: name, input: inputOverride ?? input)
         case .notify(let title, let body): return .notify(title: title, body: body)
         case .shareService(let identifier, let text): return .shareService(identifier: identifier, text: text)
+        case .toast(let feedback): return .toast(feedback)
         }
     }
 
@@ -978,6 +1104,73 @@ public final class OpenClipJSHost: @unchecked Sendable {
         return ConfigurationRequest(actionID: actionID, reason: reason, missingOptionIDs: missing)
     }
 
+    /// Extracts an existing local file URL from a JavaScript string or object.
+    private static func parseURLFromJS(_ value: JSValue?) -> URL? {
+        guard let value else { return nil }
+        if value.isString, let str = stringValue(value) {
+            return ShellResultMapper.parseExistingFileURL(from: str)
+        }
+        if value.isObject {
+            if let pathVal = value.objectForKeyedSubscript("path"), !pathVal.isUndefined && !pathVal.isNull, let str = stringValue(pathVal) {
+                return ShellResultMapper.parseExistingFileURL(from: str)
+            }
+            if let urlVal = value.objectForKeyedSubscript("url"), !urlVal.isUndefined && !urlVal.isNull, let str = stringValue(urlVal) {
+                return ShellResultMapper.parseExistingFileURL(from: str)
+            }
+        }
+        return nil
+    }
+
+    /// Builds a file payload from JavaScript path or base64 data and optional metadata.
+    private static func parseFilePayload(_ value: JSValue, options: JSValue?) -> FileOutputPayload? {
+        var pathStr: String?
+        var dataStr: String?
+        var filename: String?
+        var mimeType: String?
+
+        if value.isString {
+            pathStr = stringValue(value)
+        } else if value.isObject {
+            pathStr = stringValue(value.objectForKeyedSubscript("path")) ?? stringValue(value.objectForKeyedSubscript("url"))
+            dataStr = stringValue(value.objectForKeyedSubscript("data"))
+            filename = stringValue(value.objectForKeyedSubscript("filename")) ?? stringValue(value.objectForKeyedSubscript("name"))
+            mimeType = stringValue(value.objectForKeyedSubscript("mimeType")) ?? stringValue(value.objectForKeyedSubscript("type"))
+        }
+
+        if let options, options.isObject {
+            if filename == nil {
+                filename = stringValue(options.objectForKeyedSubscript("filename")) ?? stringValue(options.objectForKeyedSubscript("name"))
+            }
+            if mimeType == nil {
+                mimeType = stringValue(options.objectForKeyedSubscript("mimeType")) ?? stringValue(options.objectForKeyedSubscript("type"))
+            }
+        }
+
+        if let dataStr, let data = Data(base64Encoded: dataStr) {
+            guard let tempURL = ShellResultMapper.writeTemporaryOutput(data: data, filename: filename, mimeType: mimeType) else {
+                return nil
+            }
+            return FileOutputPayload(url: tempURL, filename: filename ?? tempURL.lastPathComponent, mimeType: mimeType, isTemporary: true)
+        }
+
+        if let pathStr, let url = ShellResultMapper.parseExistingFileURL(from: pathStr) {
+            return FileOutputPayload(url: url, filename: filename ?? url.lastPathComponent, mimeType: mimeType, isTemporary: false)
+        }
+
+        return nil
+    }
+
+    /// Reads the optional normalized file action from JavaScript input or options.
+    private static func parseFileAction(_ value: JSValue, options: JSValue?) -> String? {
+        if value.isObject, let act = stringValue(value.objectForKeyedSubscript("action")) {
+            return act.lowercased()
+        }
+        if let options, options.isObject, let act = stringValue(options.objectForKeyedSubscript("action")) {
+            return act.lowercased()
+        }
+        return nil
+    }
+
     /// Maps a JS `toast` style string to a `StatusFeedback.Style`.
     private static func mapToastStyle(_ raw: String) -> StatusFeedback.Style {
         switch raw.lowercased() {
@@ -1004,4 +1197,3 @@ public final class OpenClipJSHost: @unchecked Sendable {
         syncEvaluationGate.capacity
     }
 }
-

@@ -24,18 +24,20 @@ public final class InstalledAppsScanner: ObservableObject {
     @Published public var installedApps: [InstalledAppInfo] = []
     @Published public var isLoading: Bool = false
     
-    public init() {}
-    
-    public func scanInstalledApps() async -> [InstalledAppInfo] {
-        self.isLoading = true
-        defer { self.isLoading = false }
-        
-        let searchDirectories = [
+    private let searchDirectories: [String]
+
+    public init(searchDirectories: [String]? = nil) {
+        self.searchDirectories = searchDirectories ?? [
             "/Applications",
             "/System/Applications",
             ("/Applications/Utilities" as NSString).expandingTildeInPath,
             ("~/Applications" as NSString).expandingTildeInPath
         ]
+    }
+    
+    public func scanInstalledApps() async -> [InstalledAppInfo] {
+        self.isLoading = true
+        defer { self.isLoading = false }
         
         var results: [InstalledAppInfo] = []
         var seenBundleIDs = Set<String>()

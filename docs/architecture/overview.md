@@ -17,8 +17,7 @@ OpenClip Workspace
 │ ├── Action-search matcher & popup mode (ActionSearch)
 │ ├── Strongly-typed settings engine (SettingsStore, SettingKey)
 │ ├── Application policy rules (AppRule, RuleEngine)
-│ ├── Pure snippet & manifest parsing (OpenClipSnippetParser, ExtensionManifest)
-│ └── Pure AI-provider domain (ClaudeCLI, CodexCLI: argument lists, output classification, failure taxonomies)
+│ └── Pure snippet & manifest parsing (OpenClipSnippetParser, ExtensionManifest)
 │
 └── OpenClip (macOS Application Target)
  ├── AppKit floating panels & SwiftUI UI (PopupPanel, PopupView, PreferencesView)
@@ -86,7 +85,7 @@ graph TD
 ### 6. Action Coordinator & Composition — [`ActionCoordinator`](../../Sources/Core/Actions/ActionCoordinator.swift)
 - **Responsibility**: Orchestrates initial state loading, registers builtins, and connects disk extensions (including GUI-authored manifest packages) to the central `ActionRegistry`.
 - **Strict Rule**: `ExtensionManager` does not couple directly to the registry; it reports changes through `onRegister`/`onUnregister` callbacks wired by `ActionCoordinator.loadInitialState()`.
-- **Search catalog**: `ActionCoordinator.searchCatalog` (→ `ActionRegistry.searchCatalog`) exposes the **full** registered catalog — enabled and disabled, no context/visibility filtering — for the popup's action-search palette; [`ActionSearch.search`](../../Sources/Core/Actions/ActionSearch.swift) ranks it.
+- **Search catalog**: `ActionCoordinator.searchCatalog` (→ `ActionRegistry.searchCatalog`) exposes what the popup's action-search palette may offer: the registered catalog minus anything switched off in settings (per action, whole package, a disabled group's members, an AI preset toggled off) and minus anything that cannot run against the current context. It is the bar's visibility rules on a flat, unpaginated surface; [`ActionSearch.search`](../../Sources/Core/Actions/ActionSearch.swift) ranks it.
 
 ---
 

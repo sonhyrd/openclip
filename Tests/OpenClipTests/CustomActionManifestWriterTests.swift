@@ -105,10 +105,32 @@ final class CustomActionManifestWriterTests: XCTestCase {
         XCTAssertEqual(loadedShell?.type, shell.type)
         XCTAssertEqual(loadedShell?.chrome.source, .extensionPkg(packageID: shell.id))
     }
+
+    @MainActor
+    func testWriterWritesAndLoadsJavaScriptCustomAction() async throws {
+        let jsAction = CustomAction(
+            id: "com.custom.js1",
+            title: "JS Action",
+            iconName: "curlybraces",
+            type: .javaScript(script: "function action(t) { return t.toUpperCase(); }", isAsync: false, replaceSelection: true)
+        )
+        try CustomActionManifestWriter.write(action: jsAction, to: tempDir)
+
+        let manager = ExtensionManager.shared
+        manager.actionFactory = DefaultActionFactory()
+        defer { manager.actionFactory = nil }
+
+        await manager.loadExtensions(from: tempDir)
+
+        let loaded = manager.loadedActions.first(where: { $0.id == jsAction.id })
+        XCTAssertNotNil(loaded, "Expected JavaScript action to be loaded from written manifest")
+        XCTAssertTrue(loaded is JavaScriptAction, "Manifest type 'javascript' should materialize as JavaScriptAction")
+        XCTAssertEqual(loaded?.title, "JS Action")
+    }
     
     @MainActor
     func testLocateManifestReturnsNilForStandaloneScriptFile() throws {
-        // A standalone snippet script is a file, not a manifest package directory. EditActionSheet
+        // A standalone snippet script is a file, not a manifest package directory. ActionEditorPage
         // must not find a manifest for it, so the edit sheet stays read-only instead of dropping edits.
         let scriptPath = tempDir.appendingPathComponent("test_script.sh")
         let scriptContent = """
@@ -127,7 +149,7 @@ final class CustomActionManifestWriterTests: XCTestCase {
             scriptURL: scriptPath
         )
         
-        let located = EditActionSheet.locateManifest(for: scriptAction, in: tempDir)
+        let located = ActionEditorPage.locateManifest(for: scriptAction, in: tempDir)
         XCTAssertNil(located, "A standalone script file must not resolve to an editable manifest")
     }
     
@@ -141,7 +163,7 @@ final class CustomActionManifestWriterTests: XCTestCase {
         )
         try CustomActionManifestWriter.write(action: action, to: tempDir)
         
-        let located = EditActionSheet.locateManifest(for: action, in: tempDir)
+        let located = ActionEditorPage.locateManifest(for: action, in: tempDir)
         XCTAssertNotNil(located, "A manifest package must resolve to an editable manifest")
         XCTAssertEqual(located?.manifestURL.deletingLastPathComponent().lastPathComponent, action.id)
         XCTAssertEqual(located?.manifest.identifier, action.id)

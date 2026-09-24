@@ -10,6 +10,11 @@ final class ActionUsageStoreTests: XCTestCase {
         return (defaults, store)
     }
 
+    override func tearDown() {
+        UserDefaults(suiteName: #file)?.removePersistentDomain(forName: #file)
+        super.tearDown()
+    }
+
     @MainActor
     func testRecordBumpsMonotonicCounter() {
         let (_, store) = makeStore()

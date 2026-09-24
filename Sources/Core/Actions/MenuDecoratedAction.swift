@@ -71,6 +71,18 @@ public struct MenuDecoratedAction: Action, RelevanceProviding {
 
 extension MenuDecoratedAction: ConfigurableAction {
     public var preferenceIconName: String {
-        (base as? any ConfigurableAction)?.preferenceIconName ?? Constants.defaultIconSymbol
+        if let configurable = base as? any ConfigurableAction {
+            return configurable.preferenceIconName
+        }
+        switch base.icon {
+        case .symbol(let name):
+            return name
+        case .local(let url):
+            return url.lastPathComponent
+        case .url(let url):
+            return url.absoluteString
+        case .text(let txt):
+            return txt
+        }
     }
 }

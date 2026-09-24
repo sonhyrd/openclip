@@ -25,11 +25,18 @@ public struct ActionOverride: Codable, Sendable, Equatable {
     public var customTitle: String?
     public var customIconSymbol: String?
     public var customIconText: String?
+    public var deliveryPreference: ResultDeliveryPreference?
     
-    public init(customTitle: String? = nil, customIconSymbol: String? = nil, customIconText: String? = nil) {
+    public init(
+        customTitle: String? = nil,
+        customIconSymbol: String? = nil,
+        customIconText: String? = nil,
+        deliveryPreference: ResultDeliveryPreference? = nil
+    ) {
         self.customTitle = customTitle
         self.customIconSymbol = customIconSymbol
         self.customIconText = customIconText
+        self.deliveryPreference = deliveryPreference
     }
 }
 
@@ -47,15 +54,15 @@ public final class ActionCustomizationManager: ObservableObject, ActionPresentin
     
     public func loadOverrides() {
         if let data = settingsStore.get(.actionCustomizations),
-           let decoded = try? JSONDecoder().decode([String: ActionOverride].self, from: data) {
-            self.overrides = decoded
+           let document = try? SettingsDocument<[String: ActionOverride]>.decode(from: data) {
+            self.overrides = document.payload
         } else {
             self.overrides = [:]
         }
     }
     
     public func override(for actionID: String) -> ActionOverride? {
-        return overrides[actionID]
+        overrides[actionID]
     }
     
     public func setOverride(for actionID: String, title: String?, symbol: String?, text: String?) {
@@ -70,12 +77,31 @@ public final class ActionCustomizationManager: ObservableObject, ActionPresentin
         let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines)
         existing.customIconText = (trimmedText?.isEmpty == false) ? trimmedText : nil
         
-        if existing.customTitle == nil && existing.customIconSymbol == nil && existing.customIconText == nil {
+        if existing.customTitle == nil
+            && existing.customIconSymbol == nil
+            && existing.customIconText == nil
+            && existing.deliveryPreference == nil {
             overrides.removeValue(forKey: actionID)
         } else {
             overrides[actionID] = existing
         }
         
+        saveOverrides()
+    }
+
+    public func setDeliveryPreference(_ preference: ResultDeliveryPreference?, for actionID: String) {
+        var existing = overrides[actionID] ?? ActionOverride()
+        existing.deliveryPreference = preference
+
+        if existing.customTitle == nil
+            && existing.customIconSymbol == nil
+            && existing.customIconText == nil
+            && existing.deliveryPreference == nil {
+            overrides.removeValue(forKey: actionID)
+        } else {
+            overrides[actionID] = existing
+        }
+
         saveOverrides()
     }
     
@@ -108,7 +134,7 @@ public final class ActionCustomizationManager: ObservableObject, ActionPresentin
             return .text(text)
         }
         if let symbol = ov?.customIconSymbol, !symbol.isEmpty {
-            return .symbol(symbol)
+            return ActionIcon.resolve(from: symbol)
         }
         return action.icon
     }
@@ -116,7 +142,7 @@ public final class ActionCustomizationManager: ObservableObject, ActionPresentin
     public func tableIcon(for action: any Action) -> ActionIcon {
         let ov = override(for: action.id)
         if let symbol = ov?.customIconSymbol, !symbol.isEmpty {
-            return .symbol(symbol)
+            return ActionIcon.resolve(from: symbol)
         }
         if ActionIdentity.isAIPreset(action) {
             return .symbol(Constants.defaultAIIconSymbol)
@@ -155,7 +181,7 @@ public final class ActionCustomizationManager: ObservableObject, ActionPresentin
     }
 
     private func saveOverrides() {
-        if let encoded = try? JSONEncoder().encode(overrides) {
+        if let encoded = try? SettingsDocument(payload: overrides).encoded() {
             settingsStore.set(.actionCustomizations, value: encoded)
         }
     }

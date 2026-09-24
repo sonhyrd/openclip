@@ -4,6 +4,19 @@
 // The action-search palette: a focused text field filtering the full action catalog (enabled and
 // disabled) as you type, rendered as one surface with the popup bar. Results appear above or
 // below the field depending on popup position; up to 3 rows visible, scrollable beyond that.
+// Rows are chosen with the arrows + Return, the mouse, or ⌘1…⌘9 — the first nine rows carry a
+// shortcut (shown on the row) that runs them outright. The keys live on the focused field, so
+// they exist only while the palette is open. The palette's right edge, bottom edge and corner grip
+// are resize handles (`PopupResizeHandles`); the size they settle on is remembered and, passed
+// back in as `maxSize`, caps the palette on the next entry: a couple of results still get a short
+// palette, a long list grows up to the maximum and scrolls beyond it. Once the user has dragged a
+// handle (`isUserSized`), the palette keeps the dragged size verbatim until it closes.
+// A query that matches nothing is not a dead end: while AI is on, the empty state offers the
+// typed text as an AI instruction — "Ask AI" runs it once on the selection, "Save as AI tool"
+// keeps it as a custom AI preset (a searchable action from then on) and runs it. Recent
+// instructions are ordinary rows of the catalog (`RecentPromptAction`), found by typing any part
+// of them. For all of these, ⏎ / click / ⌘-digit show AI's answer in the result card (with the
+// diff) and ⇧⏎ / ⇧-click paste it over the selection (see `PaletteAIPrompt`).
 import SwiftUI
 import AppKit
 import Core
@@ -19,6 +32,15 @@ public struct PopupSearchView: View {
     /// `perform`. Passed the registered AI action id (`ai.preset.<presetID>`); nil disables the
     /// route and falls back to `perform`.
     public let onRunAI: @MainActor (String) -> Void
+    /// Runs an instruction on the selection (or standalone without context if includeContext is false).
+    /// The flag is true to paste the answer over the selection (⇧⏎, ⇧-click) and
+    /// false to show the result card first (⏎, click, ⌘-digit).
+    public let onRunAIPrompt: @MainActor (String, Bool, Bool) -> Void
+    /// Saves the typed query as a reusable AI tool and runs it — the "Save as AI tool" row. Same
+    /// flag as `onRunAIPrompt`.
+    public let onSaveAIPrompt: @MainActor (String, Bool) -> Void
+    /// Whether AI is switched on; off, the empty state keeps its plain "No matches" copy.
+    private let isAIEnabled: Bool
     /// When non-nil, the palette is scoped to a parent action's sub-actions: it lists only those
     /// children and rerenders the field with the parent's icon + a "Search within ..." placeholder.
     public let scope: SearchScope?
@@ -30,14 +52,29 @@ public struct PopupSearchView: View {
     /// Called when an action is actually run, so the controller can record usage.
     public let onActionPerformed: (@MainActor (String) -> Void)?
     /// Called right before an action performs (before `onResult` can fire), so the controller can
-    /// snapshot the action's declared delivery for the paste-vs-copy decision.
-    public let onWillPerformAction: (@MainActor (any Action) -> Void)?
+    /// snapshot the action's declared delivery for the paste-vs-copy decision. The intent is
+    /// carried explicitly — the palette's secondary signal is `replace` (⇧⏎ / the ⇧⏎ badge), which
+    /// never reaches the mouse monitor's `pendingClickIntent`, so reading live state here would
+    /// deliver a keyboard secondary run as primary.
+    public let onWillPerformAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)?
     /// Called when a `showsLoading` palette result is selected: the controller early-closes the
     /// popup and runs the action via the loading toast flow instead of the inline perform path.
-    public let onRunLoadingAction: (@MainActor (any Action) -> Void)?
+    /// Carries the same explicit intent as `onWillPerformAction`.
+    public let onRunLoadingAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)?
     /// Returns the click intent captured at mouse-down for the current click, so the palette's
     /// perform path can thread a force-copy click (⇧-click) into the action context.
     public let onClickIntent: @MainActor () -> ActionResultDelivery.ClickIntent
+    /// The most room the palette may take — the user's remembered or in-progress resize. The
+    /// palette renders at what its results need up to this; `nil` caps at the default column
+    /// (`searchPanelContentWidth` wide, `searchMaxRows` rows tall).
+    public let maxSize: CGSize?
+    /// True once the user has dragged a resize handle of this palette: it then renders at
+    /// `maxSize` verbatim — the size they set, whatever the results need — instead of the
+    /// content-fitted size.
+    public let isUserSized: Bool
+    /// Reports a drag of one of the resize handles so the owner can resize the panel and remember
+    /// the size. `.began` is reported exactly once per drag.
+    public let onResize: @MainActor (PopupResizeEdge, ResultCardDragPhase) -> Void
 
     @State private var query = ""
     @State private var selectedIndex = 0
@@ -45,9 +82,14 @@ public struct PopupSearchView: View {
     /// Set by keyboard selection moves so `.onChange` auto-scrolls the list; hover-driven
     /// selection changes leave it false so hovering the edge of a row never shifts the list.
     @State private var scrollSelectionOnKeyboard = false
+    @State private var isCommandPressed: Bool = false
+    @State private var localFlagsMonitor: Any?
+    @State private var globalFlagsMonitor: Any?
+    @ObservedObject private var modeStore: PopupModeStore
 
-    @AppStorage(SettingKey.popupTheme.name) private var selectedTheme: String = SettingKey.popupTheme.defaultValue
-    @AppStorage(SettingKey.popupThemeColor.name) private var themeColor: String = SettingKey.popupThemeColor.defaultValue
+    @Environment(\.popupEffectiveTheme) private var environmentEffectiveTheme
+    @Setting(SettingKey.popupTheme) private var selectedTheme
+    @Setting(SettingKey.popupThemeColor) private var themeColor
     @Environment(\.colorScheme) private var colorScheme
 
     /// Hover follows the same mechanism as the bar: the AX global-mouse location hit-tested
@@ -64,6 +106,9 @@ public struct PopupSearchView: View {
     @State private var hoveredTarget: SearchHoverTarget?
 
     private var effectiveTheme: String {
+        if !environmentEffectiveTheme.isEmpty {
+            return environmentEffectiveTheme
+        }
         let category = PopupThemeModel.category(fromStored: selectedTheme)
         if category == .glass { return "glass" }
         return PopupThemeModel.classicToken(appearance: themeColor, systemIsDark: colorScheme == .dark)
@@ -81,62 +126,172 @@ public struct PopupSearchView: View {
     /// every one of those reads. Recomputed exactly once per query change (and per scope rebuild).
     @State private var results: [ActionSearchIndex] = []
 
-    /// Scroll-viewport height: constant height based on searchMaxRows + peek fraction so the
-    /// search palette maintains a stable size and does not collapse or jump as the user types.
-    private var resultsViewportHeight: CGFloat {
-        (CGFloat(PopupMetrics.searchMaxRows) + PopupMetrics.searchPeekRowFraction) * PopupMetrics.searchResultRowHeight
+    /// Height of the search palette card: what the current results need (field inset, rows,
+    /// spacing, bottom padding), never shorter than `searchPaletteMinHeight` and never taller than
+    /// the maximum — the remembered size, or `defaultHeight` (`searchMaxRows` rows) — beyond which
+    /// the list scrolls. Once user-sized it is exactly the dragged size.
+    private var cardHeight: CGFloat {
+        if isUserSized, let maxSize { return maxSize.height }
+        return Self.bounded(naturalHeight, min: PopupMetrics.searchPaletteMinHeight, max: maxSize?.height ?? Self.defaultHeight)
+    }
+
+    /// Width of the search palette card. The default column is the floor — a list has a design
+    /// width, and rows only widen it when a title needs the room — capped by the maximum (the
+    /// remembered width, or the default column). Once user-sized it is exactly the dragged size.
+    private var cardWidth: CGFloat {
+        if isUserSized, let maxSize { return maxSize.width }
+        let needed = max(PopupMetrics.searchPanelContentWidth, naturalRowWidth)
+        return Self.bounded(needed, min: PopupMetrics.searchPaletteMinWidth, max: maxSize?.width ?? PopupMetrics.searchPanelContentWidth)
+    }
+
+    /// The search header height and bottom footer height.
+    static let searchHeaderHeight: CGFloat = 42.0
+    static let footerHeight: CGFloat = 32.0
+    private static let rowSpacing: CGFloat = 2.0
+    private static let listBottomPadding: CGFloat = 6.0
+
+    /// What the list needs to show every current row without scrolling.
+    private var naturalHeight: CGFloat {
+        Self.height(forRows: rowCount)
+    }
+
+    /// The AI rows under the results for the current query: Ask + Save when nothing matched, none otherwise.
+    private var promptRows: [PaletteAIPromptRow] {
+        PaletteAIPrompt.rows(for: query, aiEnabled: isAIEnabled, results: results.isEmpty ? .none : .actions)
+    }
+
+    /// The selectable rows on screen — the results followed by the AI rows. Every keyboard, hover
+    /// and ⌘-digit path indexes against this, so the AI rows are reached exactly like results.
+    private var rowCount: Int {
+        results.count + promptRows.count
+    }
+
+    static func height(forRows rows: Int) -> CGFloat {
+        searchHeaderHeight + CGFloat(rows) * PopupMetrics.searchResultRowHeight
+            + CGFloat(max(0, rows - 1)) * rowSpacing + footerHeight + listBottomPadding
+    }
+
+    /// The palette's default maximum height: `searchMaxRows` rows behind the field. Internal for tests.
+    static var defaultHeight: CGFloat {
+        CGFloat(PopupMetrics.searchMaxRows) * PopupMetrics.searchResultRowHeight +
+        CGFloat(max(0, PopupMetrics.searchMaxRows - 1)) * rowSpacing + searchHeaderHeight + footerHeight + listBottomPadding
+    }
+
+    /// The widest row among the current results — icon column, title, spacer and shortcut hint
+    /// with their paddings. Measured once per result set, never per body evaluation.
+    @State private var naturalRowWidth: CGFloat = 0
+
+    private static let titleFont = NSFont.systemFont(ofSize: 13, weight: .regular)
+    private static let shortcutFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+
+    static func naturalRowWidth(for results: [ActionSearchIndex]) -> CGFloat {
+        // Row chrome: list padding 8+8, row padding 10+10, icon column 18, icon→title spacing 10,
+        // the spacer's minimum 8, and title→shortcut spacing 10 when the row carries a shortcut.
+        let shortcutWidth = ceil(("⌘9" as NSString).size(withAttributes: [.font: shortcutFont]).width)
+        var widest: CGFloat = 0
+        for (index, item) in results.enumerated() {
+            let title = ceil((item.title as NSString).size(withAttributes: [.font: titleFont]).width)
+            var width = 16 + 20 + 18 + 10 + title + 8
+            if shortcutHint(forRow: index) != nil {
+                width += 10 + shortcutWidth
+            }
+            widest = max(widest, width)
+        }
+        // A point of slack so SwiftUI's own layout never truncates the measured title.
+        return widest + 1
+    }
+
+    private static func bounded(_ value: CGFloat, min minimum: CGFloat, max maximum: CGFloat) -> CGFloat {
+        min(max(value, minimum), max(maximum, minimum))
+    }
+
+    private static var prewarmedIndexCache: (catalogIDs: [String], usageRecency: [String: Int], index: [ActionSearchIndex])?
+
+    public static func prewarmIndex(catalog: [any Action]) {
+        let recency = ActionUsageStore.shared.recency
+        let index = buildIndex(
+            catalog: catalog,
+            scope: nil,
+            usageRecency: recency,
+            presenter: ActionCustomizationManager.shared
+        )
+        prewarmedIndexCache = (catalog.map(\.id), recency, index)
     }
 
     public init(
         catalog: [any Action],
         context: ActionContext,
-        resultsAbove: Bool,
+        resultsAbove: Bool = false,
         presenter: any ActionPresenting = ActionCustomizationManager.shared,
+        modeStore: PopupModeStore = PopupModeStore(),
         scope: SearchScope? = nil,
         usageRecency: [String: Int] = [:],
+        maxSize: CGSize? = nil,
+        isUserSized: Bool = false,
+        onResize: @escaping @MainActor (PopupResizeEdge, ResultCardDragPhase) -> Void = { _, _ in },
         onResult: @escaping @MainActor (ActionResult) -> Void,
         onExit: @escaping @MainActor () -> Void,
         onExitScope: @escaping @MainActor () -> Void = {},
         onRunAI: @escaping @MainActor (String) -> Void = { _ in },
+        onRunAIPrompt: @escaping @MainActor (String, Bool, Bool) -> Void = { _, _, _ in },
+        onSaveAIPrompt: @escaping @MainActor (String, Bool) -> Void = { _, _ in },
+        aiEnabled: Bool = AIServiceManager.shared.isAIEnabled,
         onActionPerformed: (@MainActor (String) -> Void)? = nil,
-        onWillPerformAction: (@MainActor (any Action) -> Void)? = nil,
-        onRunLoadingAction: (@MainActor (any Action) -> Void)? = nil,
+        onWillPerformAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)? = nil,
+        onRunLoadingAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)? = nil,
         onClickIntent: @escaping @MainActor () -> ActionResultDelivery.ClickIntent = { .primary }
     ) {
         self.catalog = catalog
         self.context = context
         self.resultsAbove = resultsAbove
         self.presenter = presenter
+        self._modeStore = ObservedObject(wrappedValue: modeStore)
         self.scope = scope
         self.usageRecency = usageRecency
+        self.maxSize = maxSize
+        self.isUserSized = isUserSized
+        self.onResize = onResize
         self.onResult = onResult
         self.onExit = onExit
         self.onExitScope = onExitScope
         self.onRunAI = onRunAI
+        self.onRunAIPrompt = onRunAIPrompt
+        self.onSaveAIPrompt = onSaveAIPrompt
+        self.isAIEnabled = aiEnabled
         self.onActionPerformed = onActionPerformed
         self.onWillPerformAction = onWillPerformAction
         self.onRunLoadingAction = onRunLoadingAction
         self.onClickIntent = onClickIntent
         // Index once at entry: the palette is recreated on every search entry (mode + scope
-        // transition together), so the current catalog/scope are captured here. The initial query
-        // is empty, so the ranked results are just the full index in order.
-        let initialIndex = Self.buildIndex(catalog: catalog, scope: scope, usageRecency: usageRecency, presenter: presenter)
+        // transition together), so the current catalog/scope are captured here. If a prewarmed
+        // index matches the current catalog and recency, reuse it for instant appearance; otherwise build fresh.
+        let initialIndex: [ActionSearchIndex]
+        if scope == nil,
+           let prewarmed = Self.prewarmedIndexCache,
+           prewarmed.catalogIDs == catalog.map(\.id),
+           prewarmed.usageRecency == usageRecency {
+            initialIndex = prewarmed.index
+        } else {
+            initialIndex = Self.buildIndex(catalog: catalog, scope: scope, usageRecency: usageRecency, presenter: presenter)
+        }
         _searchIndex = State(initialValue: initialIndex)
         _results = State(initialValue: initialIndex)
+        _naturalRowWidth = State(initialValue: Self.naturalRowWidth(for: initialIndex))
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            if resultsAbove {
-                resultsList
-                searchFieldRow
-            } else {
-                searchFieldRow
-                resultsList
-            }
+        ZStack(alignment: .top) {
+            resultsList
+
+            PopupResizeHandles(
+                tint: PopupThemeModel.restForeground(for: effectiveTheme),
+                accessibilityLabel: String(localized: "Resize search palette"),
+                onResize: onResize
+            )
         }
-        .frame(width: PopupMetrics.searchPanelContentWidth)
-        .clipShape(RoundedRectangle(cornerRadius: PopupMetrics.searchCornerRadius, style: .continuous))
+        .frame(width: cardWidth, height: cardHeight)
+        .background(CommandDigitCatcher { row in runRow(at: row - 1) })
+        .popupCardChrome(cornerRadius: PopupMetrics.searchCornerRadius, effectiveTheme: effectiveTheme, colorScheme: colorScheme)
         .onPreferenceChange(SearchHoverFramePreferenceKey.self) { frames in
             MainActor.assumeIsolated {
                 hoverFrames = frames
@@ -148,6 +303,7 @@ public struct PopupSearchView: View {
         }
         .onChange(of: query) { _, newValue in
             results = ActionSearch.search(newValue, in: searchIndex)
+            naturalRowWidth = Self.naturalRowWidth(for: results)
             selectedIndex = 0
         }
         .onChange(of: scope?.parent.id) { _, _ in
@@ -155,69 +311,117 @@ public struct PopupSearchView: View {
         }
         .onAppear {
             isFocused = true
+            isCommandPressed = NSEvent.modifierFlags.contains(.command)
+            localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+                isCommandPressed = event.modifierFlags.contains(.command)
+                return event
+            }
+            globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
+                isCommandPressed = event.modifierFlags.contains(.command)
+            }
+        }
+        .onDisappear {
+            if let local = localFlagsMonitor {
+                NSEvent.removeMonitor(local)
+                localFlagsMonitor = nil
+            }
+            if let global = globalFlagsMonitor {
+                NSEvent.removeMonitor(global)
+                globalFlagsMonitor = nil
+            }
         }
     }
 
+
+
+    private var selectionHighlightFill: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08)
+    }
+
+    private var selectionHighlightBorder: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05)
+    }
+
     private var searchFieldRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             searchIcon
+                .frame(width: 20, alignment: .center)
+
             TextField(
                 scope == nil
-                    ? String(localized: "Search all actions")
-                    : String(localized: "Search within \(scope?.parent.displayTitle(using: presenter) ?? "")"),
+                    ? String(localized: "Search all actions…")
+                    : String(localized: "Search within \(scope?.parent.displayTitle(using: presenter) ?? "")…"),
                 text: $query
             )
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .foregroundColor(PopupThemeModel.restForeground(for: effectiveTheme))
-                .focused($isFocused)
-                .onSubmit { runSelected() }
-                .onKeyPress { press in
-                    // Attached to the focused field: Escape drops the scope (or exits search),
-                    // up/down move the result selection.
-                    if press.key == .escape {
-                        exitSearch()
-                        return .handled
-                    }
-                    if press.key == .upArrow {
-                        moveSelection(by: -1)
-                        return .handled
-                    }
-                    if press.key == .downArrow {
-                        moveSelection(by: 1)
-                        return .handled
-                    }
-                    return .ignored
+            .textFieldStyle(.plain)
+            .font(.system(size: 14, weight: .regular))
+            .foregroundColor(PopupThemeModel.restForeground(for: effectiveTheme))
+            .focused($isFocused)
+            .onSubmit { runSelected(replace: NSEvent.modifierFlags.contains(.shift)) }
+            .onKeyPress { press in
+                if press.key == .escape {
+                    exitSearch()
+                    return .handled
                 }
-            let isEscHovered = hoveredTarget == .esc
-            Button(action: exitSearch) {
-                Text("esc")
-                    .font(.caption2)
-                    .foregroundColor(isEscHovered ? .white : PopupThemeModel.restSecondary(for: effectiveTheme))
-                    .frame(minWidth: 24)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        isEscHovered ? Color.accentColor : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .stroke(isEscHovered ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.45), lineWidth: 1)
-                    )
-                    .contentShape(Rectangle())
+                if press.key == .return {
+                    runSelected(replace: press.modifiers.contains(.shift))
+                    return .handled
+                }
+                if press.key == .upArrow {
+                    moveSelection(by: -1)
+                    return .handled
+                }
+                if press.key == .downArrow {
+                    moveSelection(by: 1)
+                    return .handled
+                }
+                return .ignored
             }
-            .buttonStyle(.plain)
-            .help("Exit search")
-            .frame(maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .searchHoverTarget(.esc)
-            .onHover { hovering in
-                useLocalHoverFallback(for: .esc, isHovering: hovering)
+
+            Spacer(minLength: 4)
+
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(PopupThemeModel.restSecondary(for: effectiveTheme).opacity(0.8))
+                }
+                .buttonStyle(.plain)
+            } else {
+                let isEscHovered = hoveredTarget == .esc
+                Button(action: exitSearch) {
+                    Text("esc")
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .foregroundColor(isEscHovered ? PopupThemeModel.restForeground(for: effectiveTheme) : PopupThemeModel.restSecondary(for: effectiveTheme))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(
+                            isEscHovered ? Color.primary.opacity(0.12) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .stroke(isEscHovered ? Color.primary.opacity(0.25) : Color.secondary.opacity(colorScheme == .dark ? 0.35 : 0.22), lineWidth: 0.5)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Exit search")
+                .searchHoverTarget(.esc)
+                .onHover { hovering in
+                    useLocalHoverFallback(for: .esc, isHovering: hovering)
+                }
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 36)
+        .padding(.horizontal, 18)
+        .offset(y: 2)
+        .frame(height: Self.searchHeaderHeight)
+        .searchHoverTarget(.searchBar)
+        .onHover { hovering in
+            useLocalHoverFallback(for: .searchBar, isHovering: hovering)
+        }
     }
 
     /// Closes the palette by dropping the scope back to the full list (Esc with an empty scoped
@@ -226,14 +430,14 @@ public struct PopupSearchView: View {
         if scope != nil { onExitScope() } else { onExit() }
     }
 
-    /// Leading field icon: the scope parent's icon when scoped, otherwise the palette's ⌘ glyph.
+    /// Leading field icon: the scope parent's icon when scoped, otherwise a native magnifying glass.
     private var searchIcon: some View {
         if let parent = scope?.parent {
             return AnyView(actionIcon(parent).foregroundColor(PopupThemeModel.restSecondary(for: effectiveTheme)))
         } else {
             return AnyView(
-                Image(systemName: "command")
-                    .font(.system(size: 13, weight: .regular))
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundColor(PopupThemeModel.restSecondary(for: effectiveTheme))
             )
         }
@@ -241,13 +445,13 @@ public struct PopupSearchView: View {
 
     /// Render an action's icon (symbol / iconify / url / local / text) at field size.
     private func actionIcon(_ action: any Action) -> some View {
-        ActionIconView(icon: rowIcon(for: action), size: 14)
+        ActionIconView(icon: rowIcon(for: action), size: 16)
     }
 
     private var resultsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                if results.isEmpty {
+                if results.isEmpty, promptRows.isEmpty {
                     VStack {
                         Spacer()
                         VStack(spacing: 4) {
@@ -261,17 +465,32 @@ public struct PopupSearchView: View {
                         Spacer()
                     }
                     .accessibilityElement(children: .combine)
-                    .frame(maxWidth: .infinity, minHeight: resultsViewportHeight)
+                    .frame(maxWidth: .infinity, minHeight: max(0, cardHeight - (Self.searchHeaderHeight + Self.footerHeight) - 16))
+                    .padding(.vertical, 4)
                 } else {
-                    LazyVStack(spacing: 0) {
+                    LazyVStack(spacing: 2) {
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, item in
                             resultRow(item: item, index: index)
                                 .id(item.id)
                         }
+                        // The AI rows follow the results (Ask + Save when nothing matched, Save
+                        // alone after recent-prompt matches).
+                        ForEach(Array(promptRows.enumerated()), id: \.element) { offset, row in
+                            promptRow(row, index: results.count + offset)
+                        }
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
                 }
             }
-            .frame(height: resultsViewportHeight)
+            .scrollContentBackground(.hidden)
+            .paletteSafeAreaBar(edge: .top, spacing: 0) {
+                searchFieldRow
+            }
+            .paletteSafeAreaBar(edge: .bottom, spacing: 0) {
+                bottomBarRow
+            }
+            .frame(height: cardHeight)
             .onChange(of: selectedIndex) { _, newValue in
                 guard scrollSelectionOnKeyboard else { return }
                 scrollSelectionOnKeyboard = false
@@ -283,34 +502,85 @@ public struct PopupSearchView: View {
 
     @ViewBuilder
     private func resultRow(item: ActionSearchIndex, index: Int) -> some View {
-        // Hover moves the selection (Spotlight-style), so exactly one row is highlighted:
-        // `selectedIndex` is updated by the hover path before this is recomputed.
         let isSelected = index == selectedIndex
+        let rowShape = RoundedRectangle(cornerRadius: PopupMetrics.searchRowCornerRadius, style: .continuous)
+
         Button {
             selectedIndex = index
-            runSelected()
+            runSelected(replace: NSEvent.modifierFlags.contains(.shift))
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 iconView(for: rowIcon(for: item.action))
                     .font(.system(size: 13, weight: .regular))
-                    .frame(width: 16)
-                    .foregroundColor(isSelected ? .white : PopupThemeModel.restForeground(for: effectiveTheme))
+                    .frame(width: 20, alignment: .center)
+                    .foregroundColor(PopupThemeModel.restForeground(for: effectiveTheme))
+
                 Text(item.title)
                     .font(.system(size: 13, weight: .regular))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .foregroundColor(isSelected ? .white : PopupThemeModel.restForeground(for: effectiveTheme))
+                    .foregroundColor(PopupThemeModel.restForeground(for: effectiveTheme))
+
                 Spacer(minLength: 8)
+
                 if let badge = badgeText(for: item.action) {
                     Text(badge)
-                        .font(.caption2)
-                        .foregroundColor(PopupThemeModel.restSecondary(for: effectiveTheme))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(
+                            isSelected
+                                ? PopupThemeModel.restForeground(for: effectiveTheme)
+                                : PopupThemeModel.restSecondary(for: effectiveTheme)
+                        )
+                }
+
+                if item.action.chrome.isInlineResult, let result = modeStore.inlineResults[item.action.id], !isCommandPressed {
+                    Text(result)
+                        .font(.system(size: 11, weight: .regular))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: PopupMetrics.inlineSearchAccessoryMaxWidth, alignment: .trailing)
+                        .foregroundColor(
+                            isSelected
+                                ? PopupThemeModel.restForeground(for: effectiveTheme)
+                                : PopupThemeModel.restSecondary(for: effectiveTheme)
+                        )
+                        .transition(.opacity)
+                } else if let shortcut = Self.shortcutHint(forRow: index) {
+                    Text(shortcut)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(
+                            isSelected
+                                ? PopupThemeModel.restForeground(for: effectiveTheme)
+                                : PopupThemeModel.restSecondary(for: effectiveTheme)
+                        )
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05),
+                            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        )
+                        .transition(.opacity)
+                        .accessibilityLabel("Command \(index + 1)")
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .frame(height: PopupMetrics.searchResultRowHeight)
-            .background(isSelected ? Color.accentColor : Color.clear)
-            .contentShape(Rectangle())
+            .animation(.easeInOut(duration: PopupMetrics.inlineCrossFadeDuration), value: isCommandPressed)
+            .background(
+                Group {
+                    if isSelected {
+                        rowShape
+                            .fill(selectionHighlightFill)
+                            .overlay(
+                                rowShape.stroke(selectionHighlightBorder, lineWidth: 0.5)
+                            )
+                    } else {
+                        Color.clear
+                    }
+                }
+            )
+            .contentShape(rowShape)
         }
         .buttonStyle(.plain)
         .searchHoverTarget(.row(index))
@@ -319,17 +589,264 @@ public struct PopupSearchView: View {
         }
     }
 
+    /// One AI fallback row — the same chrome as a result row (icon column, title, ⌘-digit hint,
+    /// selection/hover fills) so the empty state reads as two more things to run, not a notice.
+    @ViewBuilder
+    private func promptRow(_ row: PaletteAIPromptRow, index: Int) -> some View {
+        let isSelected = index == selectedIndex
+        let rowShape = RoundedRectangle(cornerRadius: PopupMetrics.searchRowCornerRadius, style: .continuous)
+        let foreground = PopupThemeModel.restForeground(for: effectiveTheme)
+        let title = PaletteAIPrompt.rowTitle(row, query: query)
+
+        Button {
+            selectedIndex = index
+            runSelected(replace: NSEvent.modifierFlags.contains(.shift))
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: PaletteAIPrompt.rowSymbol(row))
+                    .font(.system(size: 13, weight: .regular))
+                    .frame(width: 20, alignment: .center)
+                    .foregroundColor(foreground)
+
+                Text(title)
+                    .font(.system(size: 13, weight: .regular))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundColor(foreground)
+
+                Spacer(minLength: 8)
+
+                if let shortcut = Self.shortcutHint(forRow: index) {
+                    Text(shortcut)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(
+                            isSelected
+                                ? PopupThemeModel.restForeground(for: effectiveTheme)
+                                : PopupThemeModel.restSecondary(for: effectiveTheme)
+                        )
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05),
+                            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        )
+                        .accessibilityLabel("Command \(index + 1)")
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: PopupMetrics.searchResultRowHeight)
+            .background(
+                Group {
+                    if isSelected {
+                        rowShape
+                            .fill(selectionHighlightFill)
+                            .overlay(rowShape.stroke(selectionHighlightBorder, lineWidth: 0.5))
+                    } else {
+                        Color.clear
+                    }
+                }
+            )
+            .contentShape(rowShape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .searchHoverTarget(.row(index))
+        .onHover { hovering in
+            useLocalHoverFallback(for: .row(index), isHovering: hovering)
+        }
+    }
+
+    private var isSelectedAI: Bool {
+        if selectedIndex >= results.count {
+            return true
+        }
+        guard results.indices.contains(selectedIndex) else { return false }
+        return ActionIdentity.isAIPreset(results[selectedIndex].action)
+    }
+
+    /// The plain, borderless bottom bar matching the top search field.
+    private var bottomBarRow: some View {
+        HStack(spacing: 8) {
+            statusLabel
+                .padding(.leading, 14)
+
+            Spacer(minLength: 8)
+
+            footerActionButtons
+                .padding(.trailing, 14)
+        }
+        .frame(height: Self.footerHeight)
+        .searchHoverTarget(.bottomDock)
+        .onHover { hovering in
+            useLocalHoverFallback(for: .bottomDock, isHovering: hovering)
+        }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if rowCount > 0 {
+            Text(rowCount == 1 ? String(localized: "1 action") : String(localized: "\(rowCount) actions"))
+                .font(.system(size: 11, weight: .regular))
+                .foregroundColor(PopupThemeModel.restSecondary(for: effectiveTheme).opacity(0.85))
+        } else {
+            Text(String(localized: "No matches"))
+                .font(.system(size: 11, weight: .regular))
+                .foregroundColor(PopupThemeModel.restSecondary(for: effectiveTheme).opacity(0.7))
+        }
+    }
+
+    @ViewBuilder
+    private var footerActionButtons: some View {
+        if rowCount > 0 {
+            HStack(spacing: 6) {
+                if isSelectedAI {
+                    hintBadge(
+                        title: PaletteAIPrompt.secondaryActionTitle(canPaste: modeStore.canPaste),
+                        shortcut: "⇧⏎",
+                        isAccent: false
+                    ) {
+                        runSelected(replace: true)
+                    }
+
+                    hintBadge(
+                        title: PaletteAIPrompt.primaryActionTitle(),
+                        shortcut: "⏎",
+                        isAccent: true
+                    ) {
+                        runSelected(replace: false)
+                    }
+                } else {
+                    hintBadge(
+                        title: "",
+                        shortcut: "⇧⏎",
+                        isAccent: false
+                    ) {
+                        runSelected(replace: true)
+                    }
+
+                    hintBadge(
+                        title: String(localized: "Run"),
+                        shortcut: "⏎",
+                        isAccent: true
+                    ) {
+                        runSelected(replace: false)
+                    }
+                }
+            }
+            .animation(.easeInOut(duration: 0.15), value: isSelectedAI)
+        }
+    }
+
+    @ViewBuilder
+    private func hintBadge(title: String, shortcut: String, isAccent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if !title.isEmpty {
+                    Text(title)
+                        .font(.system(size: 11.5, weight: isAccent ? .semibold : .medium))
+                        .foregroundColor(
+                            isAccent
+                                ? Color.white
+                                : PopupThemeModel.restForeground(for: effectiveTheme).opacity(0.85)
+                        )
+                }
+                Text(shortcut)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(
+                        isAccent
+                            ? Color.white.opacity(0.95)
+                            : PopupThemeModel.restSecondary(for: effectiveTheme)
+                    )
+            }
+            .padding(.horizontal, title.isEmpty ? 8 : 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        isAccent
+                            ? Color.accentColor
+                            : Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.07)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(
+                                isAccent
+                                    ? Color.white.opacity(0.20)
+                                    : (colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)),
+                                lineWidth: 0.5
+                            )
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private func moveSelection(by delta: Int) {
-        guard !results.isEmpty else { return }
-        let newIndex = min(max(selectedIndex + delta, 0), results.count - 1)
+        guard rowCount > 0 else { return }
+        let newIndex = min(max(selectedIndex + delta, 0), rowCount - 1)
         guard newIndex != selectedIndex else { return }
         scrollSelectionOnKeyboard = true
         selectedIndex = newIndex
     }
 
-    private func runSelected() {
+    /// How many rows carry a ⌘-digit shortcut: ⌘1…⌘9. Rows past the ninth have none — ⌘0 is not
+    /// a tenth row, it is simply unhandled.
+    static let maxShortcutRows = 9
+
+    /// The 1-based row a ⌘-digit event points at, or nil when the event is not one. Pure, so the
+    /// modifier rules are testable without a window: exactly Command (⌥/⇧/⌃ combinations are
+    /// somebody else's shortcut), and a single digit 1...9.
+    static func commandDigitRow(for event: NSEvent) -> Int? {
+        let modifiers = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .function, .numericPad, .help])
+        guard modifiers == .command else { return nil }
+        guard let characters = event.charactersIgnoringModifiers, characters.count == 1,
+              let digit = characters.first?.wholeNumberValue,
+              (1...maxShortcutRows).contains(digit) else { return nil }
+        return digit
+    }
+
+    /// The shortcut label for a row, or nil past the ninth.
+    static func shortcutHint(forRow index: Int) -> String? {
+        guard index >= 0, index < maxShortcutRows else { return nil }
+        return "⌘\(index + 1)"
+    }
+
+    /// Runs the row a ⌘-digit points at. Returns false when there is no such row, so the keystroke
+    /// falls through to the field (⌘5 in a three-result list types nothing and does nothing)
+    /// instead of being silently swallowed.
+    private func runRow(at index: Int) -> Bool {
+        guard index >= 0, index < Self.maxShortcutRows, index < rowCount else { return false }
+        selectedIndex = index
+        runSelected(replace: false)
+        return true
+    }
+
+    /// Runs the highlighted row. `replace` only matters for AI rows (Ask, Save, recents): false
+    /// (⏎, click, ⌘-digit) shows the result card first, true (⇧⏎, ⇧-click) pastes the answer
+    /// over the selection.
+    private func runSelected(replace: Bool) {
+        if selectedIndex >= results.count {
+            // The AI rows: the typed query is the instruction.
+            let offset = selectedIndex - results.count
+            guard promptRows.indices.contains(offset) else { return }
+            let instruction = PaletteAIPrompt.instruction(from: query)
+            switch promptRows[offset] {
+            case .apply: onRunAIPrompt(instruction, replace, true)
+            case .ask: onRunAIPrompt(instruction, replace, false)
+            case .save: onSaveAIPrompt(instruction, replace)
+            }
+            return
+        }
         guard results.indices.contains(selectedIndex) else { return }
         let action = results[selectedIndex].action
+        // The intent is resolved once, up front, so the perform context and the delivery snapshot
+        // agree: `replace` (⇧⏎ / the ⇧⏎ badge) is the palette's own secondary signal and never
+        // reaches the mouse monitor, while `onClickIntent()` carries a ⇧/right mouse-down.
+        let clickIntent: ActionResultDelivery.ClickIntent = replace ? .secondary : onClickIntent()
         // AI preset actions render their result in the popup's AI card (same flow as the Sparkles
         // toolbar), so route them there instead of through `perform`.
         if ActionIdentity.isAIPreset(action) {
@@ -338,13 +855,40 @@ public struct PopupSearchView: View {
         }
         if action.chrome.showsLoading {
             if let onRunLoadingAction {
-                onRunLoadingAction(action)
+                onRunLoadingAction(action, clickIntent)
                 return
             }
             // No loading callback wired up (e.g. a preview): fall through to the inline perform path.
         }
-        onWillPerformAction?(action)
+        onWillPerformAction?(action, clickIntent)
         onActionPerformed?(action.id)
+        if action.chrome.isInlineResult {
+            if let result = modeStore.inlineResults[action.id] {
+                onResult(.text(result))
+                return
+            } else if let inFlight = InlineResultEvaluator.shared.runningTask(for: action.id) {
+                Task { @MainActor in
+                    do {
+                        if let text = await inFlight.value, !text.isEmpty {
+                            onResult(.text(text))
+                            return
+                        }
+                        let match = action.matchInfo(for: context)
+                        let performContext = ActionContext(
+                            selection: context.selection,
+                            modifiers: context.modifiers,
+                            isSecondaryClick: clickIntent == .secondary,
+                            match: match
+                        )
+                        let result = try await action.perform(performContext)
+                        onResult(result)
+                    } catch {
+                        onResult(.toast(StatusFeedback(error: error)))
+                    }
+                }
+                return
+            }
+        }
         Task { @MainActor in
             do {
                 // Same match plumbing as the bar's perform path: thread the visibility match into
@@ -353,7 +897,7 @@ public struct PopupSearchView: View {
                 let performContext = ActionContext(
                     selection: context.selection,
                     modifiers: context.modifiers,
-                    isSecondaryClick: onClickIntent() == .secondary,
+                    isSecondaryClick: clickIntent == .secondary,
                     match: match
                 )
                 let result = try await action.perform(performContext)
@@ -366,7 +910,13 @@ public struct PopupSearchView: View {
 
     /// Indexes the palette's candidates (scoped children when scoped, the full catalog otherwise)
     /// once per palette entry. Runs only when the catalog/scope inputs change, never per body eval.
-    static func buildIndex(catalog: [any Action], scope: SearchScope?, usageRecency: [String: Int], presenter: any ActionPresenting) -> [ActionSearchIndex] {
+    static func buildIndex(
+        catalog: [any Action],
+        scope: SearchScope?,
+        usageRecency: [String: Int],
+        presenter: any ActionPresenting,
+        aliases: [String: String] = ActionBindingStore.shared.aliases
+    ) -> [ActionSearchIndex] {
         let candidates = scope?.children ?? catalog
         // The unscoped palette lists leaf actions only: container rows (group rows) are hidden so
         // the results never surface an inert row that performs `.none`. Their sub-actions are
@@ -384,7 +934,8 @@ public struct PopupSearchView: View {
                     title: action.displayTitle(using: presenter),
                     keywords: Self.searchKeywords(for: action, in: catalog),
                     action: action,
-                    usageRecency: usageRecency[action.id] ?? 0
+                    usageRecency: usageRecency[action.id] ?? 0,
+                    alias: aliases[action.id] ?? ""
                 )
             }
     }
@@ -396,6 +947,7 @@ public struct PopupSearchView: View {
         let index = Self.buildIndex(catalog: catalog, scope: scope, usageRecency: usageRecency, presenter: presenter)
         searchIndex = index
         results = ActionSearch.search(query, in: index)
+        naturalRowWidth = Self.naturalRowWidth(for: results)
         selectedIndex = 0
     }
 
@@ -460,7 +1012,7 @@ public struct PopupSearchView: View {
         switch action.chrome.badge {
         case .script: return "script"
         case .url: return "url"
-        case .custom: return "custom"
+        case .custom: return nil
         case .extensionPkg: return nil
         case .none:
             if ActionIdentity.isExtension(action) { return "extension" }
@@ -473,13 +1025,44 @@ public struct PopupSearchView: View {
     /// The hovered target is derived from the shared mouse location, hit-tested against the
     /// frames each row/esc registers in the popup's named coordinate space. Hovering a row
     /// moves the keyboard selection to it so the highlight follows the mouse.
+    /// Crucially: hovering over the search bar or bottom bar NEVER shifts selection or focuses a list row!
     private func updateHoveredTarget(for location: CGPoint?) {
-        let target = location.flatMap { point in
-            hoverFrames.first(where: { $0.value.contains(point) })?.key
+        guard let point = location else {
+            hoveredTarget = nil
+            return
         }
+
+        // 1. If cursor is inside the search header (top area):
+        if point.y <= Self.searchHeaderHeight {
+            if let escFrame = hoverFrames[.esc], escFrame.contains(point) {
+                hoveredTarget = .esc
+            } else {
+                hoveredTarget = .searchBar
+            }
+            // NEVER select a list row when mouse is over the search bar
+            return
+        }
+
+        // 2. If cursor is inside the bottom dock:
+        if point.y >= (cardHeight - Self.footerHeight) {
+            hoveredTarget = .bottomDock
+            // NEVER select a list row when mouse is over the bottom dock
+            return
+        }
+
+        // 3. In the visible list zone: hit-test rows only
+        let target = hoverFrames.first(where: { key, frame in
+            switch key {
+            case .row:
+                return frame.contains(point)
+            default:
+                return false
+            }
+        })?.key
+
         guard target != hoveredTarget else { return }
         hoveredTarget = target
-        if case .row(let index) = target, index < results.count {
+        if case .row(let index) = target, index < rowCount {
             selectedIndex = index
         }
     }
@@ -491,7 +1074,7 @@ public struct PopupSearchView: View {
         if isHovering {
             guard hoveredTarget != target else { return }
             hoveredTarget = target
-            if case .row(let index) = target, index < results.count {
+            if case .row(let index) = target, index < rowCount {
                 selectedIndex = index
             }
         } else if hoveredTarget == target {
@@ -499,3 +1082,53 @@ public struct PopupSearchView: View {
         }
     }
 }
+
+
+// MARK: - ⌘-digit Key Equivalents
+
+/// Holds the palette's ⌘1…⌘9 row runner. The handler is refreshed on every SwiftUI update, so it
+/// always runs against the current result list — which is why the runner lives in an AppKit view
+/// the controller can find (`PopupWindowController.runPaletteRow`) rather than in a closure
+/// captured out of a SwiftUI `View` struct, where the `@State` results would go stale.
+///
+/// It also answers `performKeyEquivalent`, which covers the case where OpenClip *is* the active
+/// app and AppKit runs its key-equivalent phase normally. That phase never runs for the popup's
+/// non-activating panel, which is why `PaletteRowShortcuts` exists — see that file for the
+/// routing story.
+struct CommandDigitCatcher: NSViewRepresentable {
+    /// Runs the 1-based row, returning false when there is none (the event then falls through).
+    let onRow: @MainActor (Int) -> Bool
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.onRow = onRow
+        return view
+    }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) {
+        nsView.onRow = onRow
+    }
+
+    final class CatcherView: NSView {
+        var onRow: (@MainActor (Int) -> Bool)?
+
+        /// Runs a 1-based row directly, for the global ⌘-digit hot keys — those never arrive as
+        /// events in this process, so there is no key equivalent to walk.
+        @MainActor
+        func run(row: Int) -> Bool {
+            onRow?(row) ?? false
+        }
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            guard let row = PopupSearchView.commandDigitRow(for: event) else {
+                return super.performKeyEquivalent(with: event)
+            }
+            // Claimed whether or not a row exists: while the palette is on screen ⌘1…⌘9 are its
+            // own, so ⌘5 in a three-row list quietly does nothing instead of beeping or reaching
+            // the app underneath.
+            MainActor.assumeIsolated { _ = onRow?(row) }
+            return true
+        }
+    }
+}
+

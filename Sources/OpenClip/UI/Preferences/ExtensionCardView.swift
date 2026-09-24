@@ -8,6 +8,13 @@ import Core
 
 struct ExtensionCardView: View {
     let item: ExtensionItem
+    let isFeaturedExplicit: Bool?
+
+    init(item: ExtensionItem, isFeatured: Bool? = nil) {
+        self.item = item
+        self.isFeaturedExplicit = isFeatured
+    }
+
     @ObservedObject private var coordinator = ActionCoordinator.shared
     @ObservedObject private var updateManager = ExtensionUpdateManager.shared
     @State private var isInstalling = false
@@ -61,11 +68,26 @@ struct ExtensionCardView: View {
     }
 
     private var isFeatured: Bool {
-        ExtensionsStoreViewModel.isFeatured(item)
+        isFeaturedExplicit ?? ExtensionsStoreViewModel.isFeatured(item)
     }
 
-    private var isBrandNew: Bool {
-        ExtensionsStoreViewModel.isNew(item) && (item.version == nil || item.version == "1.0.0")
+    /// Byline, download count and publication date on one quiet line under the description. The
+    /// last two are what the Store sorts by, so a sorted list can be read without guessing why it
+    /// is in that order.
+    private var metadataLine: String {
+        var parts: [String] = []
+        if !item.author.isEmpty {
+            parts.append(item.author)
+        }
+        if item.downloadCount == 1 {
+            parts.append(String(localized: "\(formattedDownloadCount(item.downloadCount)) download"))
+        } else if item.downloadCount > 1 {
+            parts.append(String(localized: "\(formattedDownloadCount(item.downloadCount)) downloads"))
+        }
+        if let published = item.publishedDate {
+            parts.append(String(localized: "Added \(published.formatted(.dateTime.day().month(.abbreviated).year()))"))
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func formattedDownloadCount(_ count: Int) -> String {
@@ -101,12 +123,15 @@ struct ExtensionCardView: View {
             .background(Color.primary.opacity(0.06))
             .cornerRadius(7)
 
-            // Center Title & Description (clean 2-line layout without metadata clutter)
+            // Three levels, three weights: the name is what you scan, the
+            // description is what you read, and the byline and download count
+            // are only there once something has caught your eye. They used to be
+            // the same grey as the description, and the byline sat on the name's
+            // line, so all three competed at once.
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(item.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .font(.body.weight(.semibold))
                         .lineLimit(1)
 
                     if isFeatured {
@@ -116,35 +141,25 @@ struct ExtensionCardView: View {
                             .help(String(localized: "Featured"))
                             .accessibilityLabel(String(localized: "Featured"))
                     }
-
-                    if isBrandNew {
-                        Text(String(localized: "New"))
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.accentColor)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.12))
-                            .clipShape(Capsule())
-                    }
-
-                    if !item.author.isEmpty {
-                        Text("by @\(item.author)")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
                 }
 
                 if let err = installError {
                     Text("⚠︎ \(err)")
-                        .font(.caption2)
-                        .foregroundColor(.red)
+                        .font(.callout)
+                        .foregroundStyle(.red)
                         .lineLimit(1)
                 } else {
                     Text(item.description)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if !metadataLine.isEmpty {
+                    Text(metadataLine)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
 
@@ -152,23 +167,42 @@ struct ExtensionCardView: View {
 
             // Right Action Buttons
             HStack(spacing: 8) {
-                if item.downloadCount > 0 {
-                    HStack(spacing: 2) {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 8.5, weight: .medium))
-                        Text(formattedDownloadCount(item.downloadCount))
-                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                    }
-                    .foregroundColor(.secondary.opacity(0.8))
-                    .padding(.trailing, 2)
-                }
-
-                if isInstalled {
-                    if updateManager.updatablePackageIDs.contains(item.id) {
+                if isInstalled, updateManager.updatablePackageIDs.contains(item.id) {
+                    if #available(macOS 26.0, *) {
                         Button(action: {
                             isUpdating = true
+                            installError = nil
                             Task {
-                                try? await updateManager.update(packageID: item.id)
+                                do {
+                                    try await updateManager.update(packageID: item.id)
+                                } catch {
+                                    installError = error.localizedDescription
+                                }
+                                isUpdating = false
+                                NotificationCenter.default.post(name: .openClipExtensionsDidChange, object: nil)
+                            }
+                        }) {
+                            Label(isUpdating ? String(localized: "Updating…") : String(localized: "Update"), systemImage: "arrow.down.circle")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(SettingsDesignTokens.glassButtonBlue)
+                                .padding(.horizontal, 8)
+                                .frame(height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.ultraThinMaterial, in: .capsule)
+                        .glassEffect(.regular.tint(SettingsDesignTokens.glassButtonBlue.opacity(0.18)).interactive(), in: .capsule)
+                        .contentShape(Capsule())
+                        .disabled(isUpdating)
+                    } else {
+                        Button(action: {
+                            isUpdating = true
+                            installError = nil
+                            Task {
+                                do {
+                                    try await updateManager.update(packageID: item.id)
+                                } catch {
+                                    installError = error.localizedDescription
+                                }
                                 isUpdating = false
                                 NotificationCenter.default.post(name: .openClipExtensionsDidChange, object: nil)
                             }
@@ -179,56 +213,218 @@ struct ExtensionCardView: View {
                         .controlSize(.small)
                         .disabled(isUpdating)
                     }
-
-                    Button(isUninstalling ? String(localized: "Removing…") : String(localized: "Remove")) {
-                        if let action = matchingInstalledAction {
-                            isUninstalling = true
-                            Task {
-                                do {
-                                    try await ExtensionManager.shared.uninstallExtension(actionID: action.id)
-                                } catch {
-                                    Log.extensions.error("Failed to uninstall extension '\(action.id, privacy: .public)': \(error.localizedDescription)")
-                                }
-                                isUninstalling = false
-                                NotificationCenter.default.post(name: .openClipExtensionsDidChange, object: nil)
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .frame(minWidth: 64)
-                    .disabled(isUninstalling)
-                    .help(String(localized: "Remove \(item.name)"))
-                    .accessibilityLabel(String(localized: "Remove \(item.name)"))
-                } else {
-                    Button(isInstalling ? String(localized: "Installing…") : String(localized: "Install")) {
-                        guard let url = URL(string: item.downloadURL) else {
-                            installError = String(localized: "Invalid download URL.")
-                            return
-                        }
-                        isInstalling = true
-                        installError = nil
-                        Task {
-                            do {
-                                ExtensionManager.shared.prepareInstall(source: "store", packageID: item.id)
-                                _ = try await RemoteExtensionInstaller.shared.installFromRemoteURL(url, extensionID: item.id)
-                                await updateManager.checkForUpdates()
-                                NotificationCenter.default.post(name: .openClipExtensionsDidChange, object: nil)
-                            } catch {
-                                installError = error.localizedDescription
-                            }
-                            isInstalling = false
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .frame(minWidth: 64)
-                    .disabled(isInstalling)
                 }
+
+                StoreActionButton(
+                    item: item,
+                    isInstalled: isInstalled,
+                    isInstalling: isInstalling,
+                    isUninstalling: isUninstalling,
+                    onInstall: {
+                        performInstall()
+                    },
+                    onUninstall: {
+                        performUninstall()
+                    }
+                )
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
+    }
+
+    private func performInstall() {
+        guard let url = URL(string: item.downloadURL) else {
+            installError = String(localized: "Invalid download URL.")
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isInstalling = true
+        }
+        installError = nil
+        Task {
+            let startTime = Date()
+            do {
+                ExtensionManager.shared.prepareInstall(source: "store", packageID: item.id)
+                _ = try await RemoteExtensionInstaller.shared.installFromRemoteURL(url, extensionID: item.id)
+                await updateManager.checkForUpdates()
+            } catch {
+                installError = error.localizedDescription
+            }
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed < 0.3 {
+                try? await Task.sleep(nanoseconds: UInt64((0.3 - elapsed) * 1_000_000_000))
+            }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isInstalling = false
+            }
+            NotificationCenter.default.post(name: .openClipExtensionsDidChange, object: nil)
+        }
+    }
+
+    private func performUninstall() {
+        guard let action = matchingInstalledAction else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isUninstalling = true
+        }
+        installError = nil
+        Task {
+            let startTime = Date()
+            do {
+                try await ExtensionManager.shared.uninstallExtension(actionID: action.id)
+            } catch {
+                installError = error.localizedDescription
+                Log.extensions.error("Failed to uninstall extension '\(action.id, privacy: .public)': \(error.localizedDescription)")
+            }
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed < 0.3 {
+                try? await Task.sleep(nanoseconds: UInt64((0.3 - elapsed) * 1_000_000_000))
+            }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isUninstalling = false
+            }
+            NotificationCenter.default.post(name: .openClipExtensionsDidChange, object: nil)
+        }
+    }
+}
+
+// MARK: - Store Action Button
+
+private struct StoreActionButton: View {
+    let item: ExtensionItem
+    let isInstalled: Bool
+    let isInstalling: Bool
+    let isUninstalling: Bool
+    let onInstall: () -> Void
+    let onUninstall: () -> Void
+
+    private var isLoading: Bool {
+        isInstalling || isUninstalling
+    }
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Group {
+                if isInstalled {
+                    Button {
+                        onUninstall()
+                    } label: {
+                        ZStack {
+                            if isUninstalling {
+                                SpinningArc(color: SettingsDesignTokens.glassButtonRed)
+                                    .transition(.opacity)
+                            } else {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(SettingsDesignTokens.glassButtonRed)
+                                    .transition(.opacity)
+                            }
+                        }
+                        .frame(width: 28, height: 28)
+                        .settingsGlassCircle(tint: SettingsDesignTokens.glassButtonRed.opacity(0.14), interactive: true)
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Circle())
+                    .help(String(localized: "Remove \(item.name)"))
+                    .accessibilityLabel(String(localized: "Remove \(item.name)"))
+                } else {
+                    Button {
+                        onInstall()
+                    } label: {
+                        ZStack {
+                            if isInstalling {
+                                SpinningArc(color: .white)
+                                    .transition(.opacity)
+                            } else {
+                                Image(systemName: "arrow.down.to.line")
+                                    .font(.system(size: 11.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .transition(.opacity)
+                            }
+                        }
+                        .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.accentColor.opacity(0.85), in: Circle())
+                    .background(.ultraThinMaterial, in: Circle())
+                    .glassEffect(.regular.tint(Color.accentColor.opacity(0.35)).interactive(), in: Circle())
+                    .contentShape(Circle())
+                    .help(String(localized: "Install \(item.name)"))
+                    .accessibilityLabel(String(localized: "Install \(item.name)"))
+                }
+            }
+            .disabled(isLoading)
+            .animation(.easeInOut(duration: 0.2), value: isInstalled)
+            .animation(.easeInOut(duration: 0.2), value: isLoading)
+        } else {
+            Button {
+                if isInstalled {
+                    onUninstall()
+                } else {
+                    onInstall()
+                }
+            } label: {
+                ZStack {
+                    if isInstalling {
+                        SpinningArc(color: .white)
+                            .transition(.opacity)
+                    } else if isUninstalling {
+                        SpinningArc(color: SettingsDesignTokens.glassButtonRed)
+                            .transition(.opacity)
+                    } else if isInstalled {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(SettingsDesignTokens.glassButtonRed)
+                            .transition(.opacity)
+                    } else {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundStyle(.white)
+                            .transition(.opacity)
+                    }
+                }
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle()
+                        .fill(isInstalled ? SettingsDesignTokens.glassButtonRed.opacity(0.12) : Color.accentColor)
+                )
+            }
+            .buttonStyle(StoreActionButtonStyle())
+            .disabled(isLoading)
+            .animation(.easeInOut(duration: 0.2), value: isInstalled)
+            .animation(.easeInOut(duration: 0.2), value: isLoading)
+            .help(isInstalled ? String(localized: "Remove \(item.name)") : String(localized: "Install \(item.name)"))
+            .accessibilityLabel(isInstalled ? String(localized: "Remove \(item.name)") : String(localized: "Install \(item.name)"))
+        }
+    }
+}
+
+// MARK: - Store Action Button Style
+
+private struct StoreActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.75 : 1.0)
+    }
+}
+
+// MARK: - Spinning Arc
+
+private struct SpinningArc: View {
+    let color: Color
+    @State private var isSpinning = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.08, to: 0.82)
+            .stroke(color, style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
+            .frame(width: 12, height: 12)
+            .rotationEffect(.degrees(isSpinning ? 360 : 0))
+            .onAppear {
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                    isSpinning = true
+                }
+            }
     }
 }

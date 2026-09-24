@@ -12,22 +12,31 @@ git submodule update --init            # populate Extensions/ catalog submodule 
 ./scripts/test.sh core                 # fast Core domain test suite (<1s)
 ./scripts/test.sh                      # full test suite (0 skips, ~45s)
 ./scripts/test.sh ActionRegistryTests  # single test class
-./scripts/package_app.sh               # Release build -> build/OpenClip.zip
+./scripts/package_app.sh               # Release build -> build/OpenClip.zip + build/OpenClip.dmg
+./scripts/make_dmg.sh <app> <dmg>      # styled DMG only (see docs/dmg.md)
 ./scripts/clean.sh                     # wipe DerivedData/build caches
+./scripts/verify_signing.sh <artifact> # gate signature/hardening/notarization (--require any|developer-id|notarized)
+./scripts/sign_artifact.sh <artifact>  # inside-out re-sign of an .app, or sign a .dmg
+./scripts/notarize_artifact.sh <path>  # submit to Apple's notary service and staple the ticket
 ```
+
+**Signing is opt-in and defaults to ad-hoc**, so a clone builds with no Apple Developer account,
+certificate, or network. Never re-introduce `codesign --deep` — it re-signs outside-in and drops
+the hardened runtime and entitlements, which is how every release before this shipped unhardened.
+Adding an entitlement means editing `Sources/OpenClip/OpenClip.entitlements` (no XML comments in
+it; `codesign`'s parser rejects them), because `verify_signing.sh` fails on any difference between
+that file and the signed artifact. Full reference:
+[`docs/developer-guide/signing-and-notarization.md`](docs/developer-guide/signing-and-notarization.md).
 
 All Swift is Swift 6 with `SWIFT_STRICT_CONCURRENCY: complete`. Targets (see `project.yml`): **Core** (pure domain framework), **OpenClip** (app), **OpenClipTests**. SPM deps: KeyboardShortcuts, SDWebImageSwiftUI/SVGCoder.
 
 ## Architecture hard rules
 
-- **Core is pure** — no AppKit/SwiftUI imports in `Sources/Core/`, and the boundary is enforced by concept, not just import-grepping: UI-only presentation concerns (popup sizing/timing constants, chrome-style presentation metadata) live in `Sources/OpenClip/` — e.g. `PopupMetrics` holds popup/search sizing and `ResultCardView` renders action results natively — while `Core/Selection/Constants.swift` keeps only domain/runtime constants (timeouts, key codes, env vars, manifest keys) — except where a
-  constant belongs to a file that is deliberately Foundation-only so it can be compiled and
-  red-verified without Xcode (`Core/AI/ClaudeCLI.swift`, whose `discoveryTimeout` therefore lives
-  beside the comment explaining it rather than in `Constants.swift`). Platform side-effects live in `Sources/OpenClip/` (runtimes, `ActionResultHandler`, `DefaultActionFactory`).
+- **Core is pure** — no AppKit/SwiftUI imports in `Sources/Core/`, and the boundary is enforced by concept, not just import-grepping: UI-only presentation concerns (popup sizing/timing constants, chrome-style presentation metadata) live in `Sources/OpenClip/` — e.g. `PopupMetrics` holds popup/search sizing and `ResultCardView` renders action results natively — while `Core/Selection/Constants.swift` keeps only domain/runtime constants (timeouts, key codes, env vars, manifest keys). Platform side-effects live in `Sources/OpenClip/` (runtimes, `ActionResultHandler`, `DefaultActionFactory`).
 - **No direct `UserDefaults.standard`** in new code — route through `SettingsStore` + `SettingKey`. The only remaining raw access is the one-time `aiCloudAPIKey` migration in `AIServiceManager` (read-then-delete); don't add more. Secrets (AI API key, secret options) go to `SecretStore` (`~/.openclip/secrets.json` with 0600 POSIX permissions), never UserDefaults.
 - **`ActionCoordinator` is the composition root.** Managers report registry changes via `onRegister`/`onUnregister` callbacks only; nothing else touches `ActionRegistry.shared`.
 - **No `switch action.id` string-matching** in UI/presentation — use `ActionChrome` / `ConfigurableAction.preferenceIconName` instead.
-- Any new subprocess-spawning action must kill the child after `Constants.scriptTimeout` (60 s, the shared watchdog); shell/AppleScript/JS runtimes all join the existing `ShellProcessRunner` executor rather than spawning their own.
+- Any new subprocess-spawning action must join the existing `ShellProcessRunner` executor rather than spawning its own; `shell`, `scriptfile`, `applescript` (via `osascript`), and `shortcut` all route through it. `OpenClipJSHost` is the exception — it uses JavaScriptCore's VM execution limit for synchronous code and a `TimeoutFlag` for idle promise waiting instead of a subprocess. The shared watchdog starts cleanup at `Constants.scriptTimeout` (60 s): it terminates the child, the process group when the child is the leader, and remaining descendants. `waitUntilExit()` waits only for the direct child; descendant SIGKILL may finish afterward. Read pipes via GCD `readabilityHandler` — never a blocking `readToEnd()` — and drain both accumulators before reading their buffers, since the handler can still be behind when `waitUntilExit()` returns.
 - Verified current-state details (incl. residual debt and the search/content popup modes) live in `docs/architecture/known-debt.md` — update it when you touch those areas.
 
 ## Logging
@@ -50,9 +59,9 @@ tail -f ~/Library/Logs/OpenClip/openclip.log
 The **authoritative manifest / JS-bridge spec is `Extensions/AGENTS.md`** — read it before touching anything extension-related. Don't invent manifest keys (unknown keys are ignored; unknown `type` strings reject the whole package). Extensions live in `~/.openclip/extensions`, scanned at startup (~2 s hot reload if running).
 
 ```bash
-./scripts/new_extension.sh <Name> [--type js|group|url]  # scaffold -> Extensions/raw/
-./scripts/validate_extension.sh <dir>                           # pre-flight manifest rules check
-./scripts/install_extension.sh <path>                           # validates, then copies to ~/.openclip/extensions
+./Extensions/scripts/create.sh <Name> [--type js|url|shell|applescript]  # scaffold -> Extensions/raw/
+./Extensions/scripts/validate.sh [<dir> | --all]                        # pre-flight manifest rules check
+./Extensions/scripts/install.sh <path>                                  # validates, then installs to ~/.openclip/extensions
 ```
 
 `Extensions/` is a **git submodule** (the openclip-extensions catalog); `Extensions/raw/` sits inside that submodule's working tree, so scaffolded extensions get committed there.
@@ -60,7 +69,7 @@ The **authoritative manifest / JS-bridge spec is `Extensions/AGENTS.md`** — re
 ## Tests
  
 - `Tests/OpenClipTests/` is one flat target. Test classes that touch app singletons call `TestIsolation.reset()` in `setUp()`; store-backed tests use `MemorySettingsStore` rather than the real preferences domain.
-- All unit and integration tests are isolated with in-memory test doubles and temporary directories (including `TextRetrieverTests` and `SecretActionOptionStoreTests`), allowing the full suite to run cleanly in headless CI with zero skips.
+- All unit and integration tests are isolated with in-memory test doubles and temporary directories (including `SecretActionOptionStoreTests`), allowing the full suite to run cleanly in headless CI with zero skips.
 
 ## Localization
 

@@ -7,7 +7,9 @@
 // previous app on exit; content mode renders the result card inline on the panel and — since
 // Task 14 — is also key, reusing the same enterKeyMode()/exitKeyMode() primitives as search, with
 // Esc owned by the SwiftUI card (the controller-level key monitor stays observation-only in
-// content mode).
+// content mode, bar the one case where the card lost key). Content mode is also the one mode that
+// survives everything but an explicit answer: `cardIsModal` suppresses every automatic dismissal
+// (outside click, scroll, cursor distance, app switch) so the card lives until Copy, Paste or Esc.
 // Implements the decision-8 ActionResult tree-walk (handleActionResult): presentation results render
 // here, leaf effects route to DefaultActionResultHandler, and dismissal is decided once via
 // ActionResult.dismissesPopup.
@@ -22,6 +24,7 @@ public class PopupWindowController {
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
     private var currentContext: SelectionContext?
+    public var sourceAppBundleID: String? { currentContext?.sourceApp.bundleIdentifier }
     var currentActionContext: ActionContext?
     private var cardAbove = false
     /// Popup display mode (actions bar ↔ search palette ↔ result card), observed by PopupView.
@@ -40,6 +43,12 @@ public class PopupWindowController {
     /// True when the current session was opened directly into search mode (e.g. via keyboard shortcut),
     /// so exitSearch() (Esc) dismisses the palette completely rather than falling back to the bar.
     public private(set) var openedDirectlyInSearch: Bool = false
+
+    /// Monotonic timestamp recorded when a session starts (`show(for:)`). Used by
+    /// `workspaceDidActivateApp` to suppress the race where macOS delivers a queued
+    /// app-activation notification for the destination app within ~300 ms of the popup
+    /// opening — common after a clipboard manager dismisses itself.
+    var sessionShowTime: TimeInterval = 0
 
     private var hoveredAction: (any Action)?
 
@@ -73,6 +82,16 @@ public class PopupWindowController {
     /// row), for the result card header. Lifecycle mirrors `pendingActionTitle`. Internal for tests.
     var pendingActionIcon: ActionIcon? = nil
 
+    /// The most recent bar/palette action's ID, for delivery preference resolution. Lifecycle mirrors
+    /// `pendingActionTitle`. Internal for tests.
+    var pendingActionID: String? = nil
+
+    /// The most recent bar/palette action's recommended result. Lifecycle mirrors `pendingActionTitle`. Internal for tests.
+    var pendingActionRecommendedResult: ActionResultDeliveryMode? = nil
+
+    /// The most recent bar/palette action's output kind. Lifecycle mirrors `pendingActionTitle`. Internal for tests.
+    var pendingActionOutputKind: ActionOutputKind? = nil
+
     /// In-flight delivery context snapshotted before an action performs, preserved across hide()
     /// so an asynchronous action that finishes after popup dismissal or app-switching delivers with
     /// its original context. Internal for tests.
@@ -93,6 +112,11 @@ public class PopupWindowController {
 
     /// The standalone floating panel hosting group sub-actions and AI tool presets.
     public let subBarController: SubBarPanelController
+
+    /// The screen-space hover-tooltip surface shared with the sub-bar controller. Tooltips render
+    /// in their own window above both bar panels so they escape panel clipping, flip above/below
+    /// the hovered bar, and avoid the expanded sub-bar. Injected for tests.
+    public let tooltipController: TooltipPanelController
 
     /// The resolved active actions for the current session, used for sub-action resolution.
     private var currentActions: [any Action]? = nil
@@ -129,14 +153,16 @@ public class PopupWindowController {
     private var accumulatedScrollDelta: CGFloat = 0
 
     public init(resultHandler: ActionResultHandler = DefaultActionResultHandler(),
-                pasteProbe: PasteAvailabilityProbing = PasteAvailabilityProbe(),
-                toastController: ToastPanelController = ToastPanelController(),
-                subBarController: SubBarPanelController = SubBarPanelController(),
-                settingsStore: SettingsStore = DefaultSettingsStore.shared) {
+                 pasteProbe: PasteAvailabilityProbing = PasteAvailabilityProbe(),
+                 toastController: ToastPanelController = ToastPanelController(),
+                 subBarController: SubBarPanelController = SubBarPanelController(),
+                 tooltipController: TooltipPanelController = .shared,
+                 settingsStore: SettingsStore = DefaultSettingsStore.shared) {
         self.resultHandler = resultHandler
         self.pasteProbe = pasteProbe
         self.toastController = toastController
         self.subBarController = subBarController
+        self.tooltipController = tooltipController
         self.settingsStore = settingsStore
 
         self.subBarController.onDismiss = { [weak self] in
@@ -169,6 +195,7 @@ public class PopupWindowController {
     }
 
     func show(for context: SelectionContext, pasteAvailable: Bool?, preservingSessionID: UUID?, streamingTask: Task<Void, Never>?, initialMode: PopupMode = .actions) {
+        let evaluator = InlineResultEvaluator.shared
         let aiSession: UUID
         if let preservingSessionID {
             aiSession = preservingSessionID
@@ -181,12 +208,14 @@ public class PopupWindowController {
             activeStreamingTask = nil
             activeLoadingTask?.cancel()
             activeLoadingTask = nil
+            evaluator.cancelSession(aiSessionID)
             aiSession = UUID()
             aiSessionID = aiSession
         }
 
         isMenuTracking = false
         currentContext = context
+        sessionShowTime = ProcessInfo.processInfo.systemUptime
 
         // The source app is frontmost when the popup shows; capture it once for the whole session.
         // Skip the capture while OpenClip itself is frontmost (e.g. a preference window, or a mid-
@@ -203,7 +232,10 @@ public class PopupWindowController {
         // A fresh show is an intentional placement: never re-anchor it (stale search-mode pinning
         // must not correct the new frame). enterSearch() re-enables pinning for growth.
         panel.pinBottomEdgeOnResize = false
+        panel.releasesBottomPinAfterGrowth = false
         panel.horizontalAnchor = .none
+        modeStore.resultCardSize = nil
+        modeStore.isSurfaceUserSized = false
         preSearchFrame = nil
         openedDirectlyInSearch = (initialMode == .search)
 
@@ -212,24 +244,29 @@ public class PopupWindowController {
         let rawVertical = settingsStore.get(SettingKey.popupVerticalPosition)
         let verticalPosition = PopupVerticalPosition(rawValue: rawVertical) ?? .auto
 
-        // Pre-compute card direction from real screen position
-        let screen: NSScreen? = {
-            if initialMode == .search {
-                return NSScreen.main ?? PopupPositioner.screen(containing: context.cursorPosition)
-            }
-            return PopupPositioner.screen(containing: context.cursorPosition) ?? NSScreen.main
-        }()
+        // Pre-compute card direction from real screen position. Placement is the same for both
+        // entry points: a palette opened by the shortcut is anchored on the selection and honors
+        // the alignment / vertical-position preferences exactly like the bar the mouse opens —
+        // it used to land in the middle of the main screen, ignoring both.
+        let screen = PopupPositioner.screen(containing: context.cursorPosition) ?? NSScreen.main
         let screenBounds = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
-        let tempFrame: CGRect
-        if initialMode == .search {
-            tempFrame = PopupPositioner.centerInScreen(popupSize: CGSize(width: PopupMetrics.searchPanelWidth, height: 50), screenBounds: screenBounds)
-        } else {
-            tempFrame = PopupPositioner.calculateFrame(
-                for: context, popupSize: CGSize(width: 320, height: 50), in: screenBounds, alignment: alignment, verticalPosition: verticalPosition)
-        }
+        // A palette opened directly by the hotkey renders at its remembered size from the first
+        // frame (enterSearch() is not on this path), so restore it before the view is built; a
+        // remembered palette may also be taller than the shared bar/palette cap.
+        modeStore.searchPaletteSize = initialMode == .search ? rememberedSize(for: .palette, in: screenBounds) : nil
+        panel.heightCap = initialMode == .search ? screenBounds.height : PopupMetrics.popupMaxHeight
+        let probeWidth = initialMode == .search ? currentSearchPanelWidth : 320
+        let tempFrame = PopupPositioner.calculateFrame(
+            for: context,
+            popupSize: CGSize(width: probeWidth, height: 50),
+            in: screenBounds,
+            alignment: alignment,
+            verticalPosition: verticalPosition
+        )
         cardAbove = tempFrame.minY < screenBounds.minY + PopupMetrics.cardAboveThreshold
 
         modeStore.mode = initialMode
+        PaletteRowShortcuts.setActive(initialMode == .search)
         modeStore.searchResultsAbove = cardAbove
         modeStore.subBarAbove = PopupPositioner.isPlacedAbove(frame: tempFrame, releasePoint: context.cursorPosition)
         // Probed before selection retrieval by the trigger sites and resolved before this frame,
@@ -240,6 +277,29 @@ public class PopupWindowController {
             ? availableActions.filter { !($0 is any PasteRequiringAction) }
             : availableActions
         self.currentActions = activeActions
+
+        modeStore.inlineResults.removeAll()
+        let catalog = ActionCoordinator.shared.searchCatalog(for: actionContext)
+        var combinedActions = activeActions
+        for item in catalog where !combinedActions.contains(where: { $0.id == item.id }) {
+            combinedActions.append(item)
+        }
+        let inlineActions = combinedActions.filter { $0.chrome.isInlineResult }
+        let textHash = context.text.hashValue
+
+        for action in inlineActions {
+            if let prewarmed = evaluator.prewarmedResult(for: action, textHash: textHash) {
+                modeStore.inlineResults[action.id] = prewarmed
+            } else if let syncResult = evaluator.evaluateSynchronous(action: action, context: actionContext) {
+                modeStore.inlineResults[action.id] = syncResult
+            } else {
+                evaluator.startEvaluation(action: action, context: actionContext, sessionID: aiSession) { [weak self] result in
+                    guard let self, let result, !result.isEmpty else { return }
+                    guard self.aiSessionID == aiSession else { return }
+                    self.modeStore.inlineResults[action.id] = result
+                }
+            }
+        }
 
         let rootView = PopupView(
             actions: activeActions,
@@ -254,6 +314,10 @@ public class PopupWindowController {
             onEnterSearch: { [weak self] frame in self?.enterSearch(buttonLocalFrame: frame) },
             onExitSearch: { [weak self] in self?.exitSearch() },
             onExitContent: { [weak self] in self?.exitContent() },
+            onDismissContent: { [weak self] in self?.hide() },
+            onCardDrag: { [weak self] phase in self?.handleCardDrag(phase) },
+            onResize: { [weak self] edge, phase in self?.handleResize(edge, phase: phase) },
+            onPinCard: { [weak self] in self?.pinCard() },
             onCardEffect: { [weak self] result in
                 self?.performCardEffect(result)
             },
@@ -262,6 +326,7 @@ public class PopupWindowController {
             },
             onContentSizeChange: { [weak self] size in
                 self?.resizePanel(to: size)
+                self?.keepPanelOnScreen()
             },
             onAIStateChange: { [weak self] active, _ in
                 self?.setAIProcessing(active, session: aiSession)
@@ -290,38 +355,54 @@ public class PopupWindowController {
             onActionPerformed: { [weak self] actionID in
                 self?.usageStore.record(actionID)
             },
-            onWillPerformAction: { [weak self] action in
+            onWillPerformAction: { [weak self] action, clickIntent in
                 guard let self else { return }
                 self.pendingDelivery = action.delivery
                 self.pendingActionTitle = action.title
                 self.pendingActionIcon = action.displayIcon(using: ActionCustomizationManager.shared)
-                self.inFlightDeliveryContext = self.deliverySnapshot(for: action)
+                self.pendingActionID = action.id
+                self.pendingActionRecommendedResult = action.chrome.recommendedResult
+                self.pendingActionOutputKind = action.chrome.outputKind
+                self.inFlightDeliveryContext = self.deliverySnapshot(for: action, clickIntent: clickIntent)
             },
-            onRunLoadingAction: { [weak self] action in
+            onRunLoadingAction: { [weak self] action, clickIntent in
                 guard let self, let context = self.currentActionContext else { return }
-                self.runLoadingAction(action, with: context, isSecondaryClick: self.pendingClickIntent == .secondary)
+                self.runLoadingAction(action, with: context, isSecondaryClick: clickIntent == .secondary)
             },
             onRunAI: { [weak self] actionID in
                 guard let self, let preset = AIServiceManager.shared.preset(forActionID: actionID) else { return }
                 let prompt = AIServiceManager.shared.promptForPreset(preset)
                 self.runAIPreset(prompt: prompt, title: preset.title)
             },
-            onClickIntent: { [weak self] in self?.pendingClickIntent ?? .primary }
+            onRunAIPrompt: { [weak self] instruction, replace, includeContext in
+                self?.runAIPrompt(instruction, replace: replace, includeContext: includeContext)
+            },
+            onSaveAIPrompt: { [weak self] instruction, replace in
+                self?.saveAndRunAIPrompt(instruction, replace: replace)
+            },
+            onFollowUp: { [weak self] instruction in
+                self?.runFollowUp(instruction)
+            },
+            onCancelFollowUp: { [weak self] in
+                self?.cancelFollowUp()
+            },
+            onClickIntent: { [weak self] in self?.pendingClickIntent ?? .primary },
+            onShowTooltip: { [weak self] text, localFrame, theme, isDark in
+                self?.presentTooltip(text: text, localFrame: localFrame, effectiveTheme: theme, isDark: isDark)
+            },
+            onHideTooltip: { [weak self] in
+                self?.tooltipController.hide()
+            }
         )
+        syncPanelAppearance(panel)
         panel.contentView = PopupPanel.ContentView(rootView: rootView)
         panel.contentView?.layoutSubtreeIfNeeded()
         let size = sanitizedPopupSize(panel.contentView?.fittingSize)
 
         // Compute card direction from real screen position using the actual rendered panel size.
-        let calculatedFrame: CGRect
-        if initialMode == .search {
-            calculatedFrame = PopupPositioner.centerInScreen(popupSize: size, screenBounds: screenBounds)
-            panel.setFrame(calculatedFrame, display: true)
-        } else {
-            calculatedFrame = PopupPositioner.calculateFrame(
-                for: context, popupSize: size, in: screenBounds, alignment: alignment, verticalPosition: verticalPosition)
-            positionPanel(panel, size: size, for: context, alignment: alignment, verticalPosition: verticalPosition)
-        }
+        let calculatedFrame = PopupPositioner.calculateFrame(
+            for: context, popupSize: size, in: screenBounds, alignment: alignment, verticalPosition: verticalPosition)
+        positionPanel(panel, size: size, for: context, alignment: alignment, verticalPosition: verticalPosition)
         cardAbove = calculatedFrame.minY < screenBounds.minY + PopupMetrics.cardAboveThreshold
         modeStore.searchResultsAbove = cardAbove
         modeStore.subBarAbove = PopupPositioner.isPlacedAbove(frame: calculatedFrame, releasePoint: context.cursorPosition)
@@ -330,9 +411,13 @@ public class PopupWindowController {
         // pagination) must re-center rather than drift off the cursor.
         panel.horizontalAnchor = .center
         // Content-driven growth keeps the panel's bottom edge fixed when the popup sits low on
-        // screen — same anchor rule as search/content mode.
-        panel.pinBottomEdgeOnResize = cardAbove
-        panel.orderFront(nil)
+        // screen — same anchor rule as search/content mode. A palette opened directly is already
+        // placed at its size; its later changes (the list shrinking as a query narrows) must keep
+        // the field at the top fixed, so it is not pinned.
+        panel.pinBottomEdgeOnResize = initialMode == .search ? false : cardAbove
+        if NSClassFromString("XCTestCase") == nil {
+            panel.orderFront(nil)
+        }
         
         setupMonitors()
 
@@ -342,6 +427,7 @@ public class PopupWindowController {
                 await Task.yield()
                 self.focusSearchField()
             }
+            scheduleKeepPanelOnScreen()
         }
     }
 
@@ -382,10 +468,12 @@ public class PopupWindowController {
     /// session value exists yet — mid-session re-entry (search → bar → search, or content → search)
     /// must keep the original source app — and only when that app is not OpenClip itself.
     private func enterKeyMode() {
-        guard let panel, panel.isVisible else { return }
+        guard let panel else { return }
         captureFrontmostAppIfNeeded()
         panel.allowsKey = true
-        panel.makeKeyAndOrderFront(nil)
+        if NSClassFromString("XCTestCase") == nil {
+            panel.makeKeyAndOrderFront(nil)
+        }
     }
 
     /// Restores the never-key invariant and hands keyboard focus back to the source app. Deliberately
@@ -404,6 +492,12 @@ public class PopupWindowController {
     /// stays active throughout.
     public func enterSearch(with scope: SearchScope? = nil, buttonLocalFrame: CGRect? = nil) {
         guard let panel, panel.isVisible else { return }
+        // A fresh palette starts a fresh run context. Drop any intent left by the click that opened
+        // it (right-clicking a group row sets `.secondary`) so a keyboard primary run — Return, a
+        // ⌘-digit, the "Run" badge — is not delivered as a secondary click. Each subsequent run
+        // resolves its own intent (mouse-down, or the palette's `replace` flag) and passes it
+        // explicitly.
+        pendingClickIntent = .primary
         if preSearchFrame == nil {
             preSearchFrame = panel.frame
         }
@@ -413,17 +507,29 @@ public class PopupWindowController {
         if modeStore.mode != .search || scope != nil {
             modeStore.scope = scope
         }
+        if modeStore.mode != .search {
+            // Fresh entry (not a scope hop): the palette may open as tall as its remembered
+            // maximum, which can exceed the shared bar/palette cap.
+            modeStore.searchPaletteSize = rememberedSize(for: .palette, in: screenBounds(for: panel))
+            modeStore.isSurfaceUserSized = false
+            panel.heightCap = screenBounds(for: panel).height
+            // The entry growth keeps the panel's bottom edge fixed when the popup sits low on screen
+            // (the palette must extend upward to stay on it); see PopupPanel.setFrame. That pin is
+            // one-shot: once the palette is up, its height follows the result count, and the field
+            // at its top must stay put — later changes anchor the top edge. A scope hop is not a
+            // fresh entry and leaves the anchoring alone.
+            panel.pinBottomEdgeOnResize = modeStore.searchResultsAbove
+            panel.releasesBottomPinAfterGrowth = modeStore.searchResultsAbove
+        }
         modeStore.mode = .search
-        // Content-driven growth keeps the panel's bottom edge fixed (results render above the field,
-        // so growth must extend upward); see PopupPanel.setFrame.
-        panel.pinBottomEdgeOnResize = modeStore.searchResultsAbove
-        panel.horizontalAnchor = .center
+        PaletteRowShortcuts.setActive(true)
 
         if let buttonLocalFrame {
+            panel.horizontalAnchor = .none
             let barFrame = preSearchFrame ?? panel.frame
             preSearchFrame = barFrame
             let buttonScreenMidX = barFrame.minX + buttonLocalFrame.midX
-            let searchPanelWidth = PopupMetrics.searchPanelWidth
+            let searchPanelWidth = currentSearchPanelWidth
             let screen = panel.screen ?? NSScreen.main
             let screenBounds = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
             let clampedMidX = PopupPositioner.searchPaletteMidX(
@@ -435,6 +541,7 @@ public class PopupWindowController {
 
             panel.setFrame(CGRect(x: clampedMidX - searchPanelWidth / 2, y: panel.frame.origin.y, width: searchPanelWidth, height: panel.frame.height), display: false)
         }
+        panel.horizontalAnchor = .center
 
         enterKeyMode()
         // Explicitly make the search field first responder on the next run-loop turn. A @FocusState
@@ -444,6 +551,22 @@ public class PopupWindowController {
             await Task.yield()
             self.focusSearchField()
         }
+        scheduleKeepPanelOnScreen()
+    }
+
+    /// The panel width for the palette: its remembered width when there is one, else the default
+    /// column, plus the shadow ring on both sides.
+    private var currentSearchPanelWidth: CGFloat {
+        (modeStore.searchPaletteSize?.width ?? PopupMetrics.searchPanelContentWidth) + 2 * PopupMetrics.popupShadowInset
+    }
+
+    /// The hosting view grows the panel to the palette on its own, after the current run-loop turn
+    /// (and sometimes a display pass later); a remembered palette can be tall enough for that
+    /// growth to run off a screen edge, so nudge it back once the growth has landed. Same two
+    /// retries as `showResultCard`.
+    private func scheduleKeepPanelOnScreen() {
+        DispatchQueue.main.async { [weak self] in self?.keepPanelOnScreen() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.keepPanelOnScreen() }
     }
 
     /// Opens the palette scoped to a bar row's sub-actions. The parent action supplies its children
@@ -486,18 +609,38 @@ public class PopupWindowController {
         }
         modeStore.scope = nil
         modeStore.mode = .actions
+        PaletteRowShortcuts.setActive(false)
         // Return to the bar keeps the field-anchoring rule active for hover-preview/banner growth
         // (strip renders above the bar when the popup sits low), so set it explicitly rather than
         // leaving the search-mode value behind. Cleared by show()/hide() before placement.
         panel?.pinBottomEdgeOnResize = modeStore.searchResultsAbove
+        panel?.releasesBottomPinAfterGrowth = false
         if let preSearchFrame, let panel {
-            panel.setFrame(CGRect(x: preSearchFrame.origin.x, y: panel.frame.origin.y, width: preSearchFrame.width, height: panel.frame.height), display: false)
+            panel.horizontalAnchor = .none
+            // The collapse keeps the bottom edge (results above) or the top edge (results below).
+            // The top never moves during a session, but a palette whose height followed the result
+            // count moved its bottom edge — put it back on the bar's original bottom first, so the
+            // bar lands exactly where it was.
+            let restoredY = modeStore.searchResultsAbove ? preSearchFrame.minY : panel.frame.minY
+            panel.setFrame(CGRect(x: preSearchFrame.origin.x, y: restoredY, width: preSearchFrame.width, height: panel.frame.height), display: false)
+            panel.horizontalAnchor = .center
         }
         preSearchFrame = nil
+        // After the frame restore above, so a resized (tall) palette is not clamped mid-collapse;
+        // the bar's own shrink requests a height well under the cap.
+        modeStore.searchPaletteSize = nil
+        modeStore.isSurfaceUserSized = false
+        resizeAnchor = nil
+        panel?.heightCap = PopupMetrics.popupMaxHeight
         exitKeyMode() // reactivates previousFrontmostApp but keeps it for the session
     }
 
     // MARK: - AI Result Card
+
+    /// True while the result card is on screen AND the user has dragged it aside to keep it open.
+    /// An un-dragged result card remains standard and dismisses on outside clicks.
+    public var cardIsModal: Bool { modeStore.mode == .content && hasUserMovedCard }
+    public private(set) var hasUserMovedCard: Bool = false
 
     /// Applies a streaming "processing" flag update, but only for the session the update
     /// belongs to. A stale stream (popup dismissed mid-stream, superseded by a new selection)
@@ -512,20 +655,59 @@ public class PopupWindowController {
     /// renders here — AI presets stream into it via `onAIResult`, extensions land via the
     /// delivery snapshot with their own icon. Paste/Copy are explicit user requests routed
     /// through `performCardEffect`, so they bypass the paste-vs-copy re-decision — an explicit
-    /// Paste always pastes. Probes (AX) whether the target app can paste so the card can hide its
-    /// Paste button; the probe targets the captured source app, never OpenClip itself. Deliveries
+    /// Paste always pastes. The selection the action ran on is carried in the payload so the card
+    /// can render a character-level diff of what changed. Probes (AX) whether the target app can
+    /// paste so the card can hide its Paste button; the probe targets the captured source app,
+    /// never OpenClip itself. Deliveries
     /// are session-stamped: a chunk from an abandoned stream is dropped instead of hijacking the
     /// current popup into content mode. Internal for tests.
-    func showResultCard(text: String, isError: Bool, title: String, icon: ActionIcon? = nil, isStreaming: Bool = false, session: UUID) {
+    func showResultCard(
+        text: String,
+        isError: Bool,
+        title: String,
+        icon: ActionIcon? = nil,
+        isStreaming: Bool = false,
+        session: UUID,
+        originalText: String? = nil,
+        overrideOriginal: Bool = false,
+        canFollowUp: Bool = true,
+        file: FileOutputPayload? = nil
+    ) {
         guard session == aiSessionID else { return }
         if toastController.isLoading {
             toastController.hide()
         }
         modeStore.isProcessingAI = isStreaming
-        modeStore.resultCard = ResultCardPayload(text: text, isError: isError, title: title, icon: icon, isStreaming: isStreaming)
+        let original = overrideOriginal ? originalText : currentActionContext?.selection.text
+        // The selection the action ran on rides along so the card can diff input → output.
+        modeStore.resultCard = ResultCardPayload(
+            text: text,
+            isError: isError,
+            title: title,
+            icon: icon,
+            isStreaming: isStreaming,
+            original: original,
+            canFollowUp: canFollowUp,
+            file: file
+        )
+        if !isStreaming {
+            // A settled card hands the keyboard to its instruction field so the next refinement
+            // is just typing.
+            Task { @MainActor in
+                await Task.yield()
+                self.focusCardField()
+            }
+        }
         if modeStore.mode != .content {
+            hasUserMovedCard = false
+            PaletteRowShortcuts.setActive(false)
             panel?.pinBottomEdgeOnResize = modeStore.searchResultsAbove
             panel?.horizontalAnchor = .center
+            // A remembered (or later resized) card may be far taller than the bar/palette cap:
+            // let the panel grow as tall as the screen; the card's own clamps keep it on-screen.
+            if let panel { panel.heightCap = screenBounds(for: panel).height }
+            modeStore.resultCardSize = rememberedSize(for: .card)
+            modeStore.isSurfaceUserSized = false
             modeStore.mode = .content
             enterKeyMode()
         }
@@ -533,44 +715,245 @@ public class PopupWindowController {
         // Tell the hosting view its intrinsic content size has changed so AppKit
         // re-measures on the next display cycle (the mode change schedules a SwiftUI
         // re-evaluation, but NSHostingView won't re-measure without this nudge).
-        panel?.contentView?.invalidateIntrinsicContentSize()
-        panel?.contentView?.layoutSubtreeIfNeeded()
-        if let fittingSize = panel?.contentView?.fittingSize {
-            let size = sanitizedPopupSize(fittingSize)
-            resizePanel(to: size)
-        }
+        fitPanelToContent()
         // Retry after the current AppKit display cycle completes — DispatchQueue.main.async
         // fires after the run-loop turn, unlike Task.yield() which only yields in the
         // cooperative pool without guaranteeing a display pass.
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.panel?.contentView?.invalidateIntrinsicContentSize()
-            self.panel?.contentView?.layoutSubtreeIfNeeded()
-            if let fittingSize = self.panel?.contentView?.fittingSize {
-                let size = self.sanitizedPopupSize(fittingSize)
-                self.resizePanel(to: size)
-            }
+            self?.fitPanelToContent()
         }
         // Safety-net retry for the first content-mode entry where SwiftUI swaps
         // the entire view tree (bar → ResultCardView) and needs an extra
         // layout pass to settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self, self.modeStore.mode == .content else { return }
-            self.panel?.contentView?.invalidateIntrinsicContentSize()
-            self.panel?.contentView?.layoutSubtreeIfNeeded()
-            if let fittingSize = self.panel?.contentView?.fittingSize {
-                let size = self.sanitizedPopupSize(fittingSize)
-                self.resizePanel(to: size)
+            self.fitPanelToContent()
+        }
+    }
+
+    /// Re-measures the hosting view and grows/shrinks the panel to its content, then nudges the
+    /// panel back inside the screen: a card opening at a remembered size can be far taller than
+    /// the bar it replaces, so the anchored growth may otherwise run off a screen edge.
+    private func fitPanelToContent() {
+        guard let contentView = panel?.contentView else { return }
+        contentView.invalidateIntrinsicContentSize()
+        contentView.layoutSubtreeIfNeeded()
+        resizePanel(to: sanitizedPopupSize(contentView.fittingSize))
+        keepPanelOnScreen()
+    }
+
+    /// Moves the panel the minimum distance needed to sit inside its screen (by `popupPadding`)
+    /// while a resizable surface shows. Only automatic placement is corrected: a card the user
+    /// dragged stays where they put it.
+    private func keepPanelOnScreen() {
+        guard let panel, panel.isVisible, resizableSurface != nil, !hasUserMovedCard else { return }
+        let bounds = screenBounds(for: panel).insetBy(dx: PopupMetrics.popupPadding, dy: PopupMetrics.popupPadding)
+        var origin = panel.frame.origin
+        origin.x = max(min(origin.x, bounds.maxX - panel.frame.width), bounds.minX)
+        origin.y = max(min(origin.y, bounds.maxY - panel.frame.height), bounds.minY)
+        if origin != panel.frame.origin {
+            panel.setFrameOrigin(origin)
+        }
+    }
+
+    // MARK: - Resizable Surfaces
+
+    /// The popup surfaces with resize handles. Each has its own floor and remembers its own size
+    /// under its own keys; the geometry, the panel handling and the persistence flow are shared.
+    private enum ResizableSurface {
+        case card
+        case palette
+
+        var minSize: CGSize {
+            switch self {
+            case .card:
+                return CGSize(width: PopupMetrics.aiCardMinWidth, height: PopupMetrics.aiCardMinHeight)
+            case .palette:
+                return CGSize(width: PopupMetrics.searchPaletteMinWidth, height: PopupMetrics.searchPaletteMinHeight)
             }
         }
+
+        var widthKey: SettingKey<Double> {
+            switch self {
+            case .card: return SettingKey.resultCardWidth
+            case .palette: return SettingKey.searchPaletteWidth
+            }
+        }
+
+        var heightKey: SettingKey<Double> {
+            switch self {
+            case .card: return SettingKey.resultCardHeight
+            case .palette: return SettingKey.searchPaletteHeight
+            }
+        }
+    }
+
+    /// The resizable surface currently on screen, if the popup is showing one.
+    private var resizableSurface: ResizableSurface? {
+        switch modeStore.mode {
+        case .content: return .card
+        case .search: return .palette
+        case .actions: return nil
+        }
+    }
+
+    private func liveSize(for surface: ResizableSurface) -> CGSize? {
+        switch surface {
+        case .card: return modeStore.resultCardSize
+        case .palette: return modeStore.searchPaletteSize
+        }
+    }
+
+    private func setLiveSize(_ size: CGSize?, for surface: ResizableSurface) {
+        switch surface {
+        case .card: modeStore.resultCardSize = size
+        case .palette: modeStore.searchPaletteSize = size
+        }
+    }
+
+    /// The size the user last resized `surface` to, fitted to `screenBounds` (the panel's screen
+    /// when nil); nil until the surface has been resized once, so it keeps its default sizing.
+    private func rememberedSize(for surface: ResizableSurface, in screenBounds: CGRect? = nil) -> CGSize? {
+        let width = settingsStore.get(surface.widthKey)
+        let height = settingsStore.get(surface.heightKey)
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
+        let bounds = screenBounds ?? panel.map { self.screenBounds(for: $0) } ?? Self.fallbackScreenBounds
+        return PopupResizeGeometry.fit(CGSize(width: width, height: height), minSize: surface.minSize, in: bounds)
+    }
+
+    private static let fallbackScreenBounds = NSRect(x: 0, y: 0, width: 800, height: 600)
+
+    private func screenBounds(for panel: PopupPanel) -> CGRect {
+        panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? Self.fallbackScreenBounds
+    }
+
+    /// Where the panel sat, and where the cursor was, when the current card drag began. Nil while
+    /// no drag is in flight.
+    private var cardDragAnchor: (mouse: CGPoint, origin: CGPoint)?
+
+    /// Moves the panel with the cursor while the card's header handle is dragged. The move is
+    /// computed from the *absolute* cursor position against the anchor taken at `.began`, never
+    /// from the gesture's own translation: the window moves out from under the pointer, so a
+    /// translation-based move would fight itself and crawl. `mouseLocation` is injectable so the
+    /// geometry is testable without a real cursor. Internal for tests.
+    func handleCardDrag(_ phase: ResultCardDragPhase, mouseLocation: CGPoint? = nil) {
+        guard let panel else { return }
+        let mouse = mouseLocation ?? NSEvent.mouseLocation
+        switch phase {
+        case .began:
+            panel.prepareForUserDrag()
+            cardDragAnchor = (mouse: mouse, origin: panel.frame.origin)
+        case .changed:
+            guard let anchor = cardDragAnchor else { return }
+            panel.setFrameOrigin(CGPoint(x: anchor.origin.x + (mouse.x - anchor.mouse.x),
+                                         y: anchor.origin.y + (mouse.y - anchor.mouse.y)))
+        case .ended:
+            cardDragAnchor = nil
+            panel.endUserDrag()
+            hasUserMovedCard = true
+        }
+    }
+
+    /// Toggles the explicit pin state of the result card. Pinning makes the card modal — the same
+    /// `hasUserMovedCard` gate that dragging the card sets — so the card suppresses auto-dismiss
+    /// (outside-click, scroll, cursor distance, app switch). Unpinning restores non-modal behavior.
+    func pinCard() {
+        let nowPinned = !modeStore.isCardPinned
+        modeStore.isCardPinned = nowPinned
+        hasUserMovedCard = nowPinned
+    }
+
+    // MARK: - Resize
+
+    /// Where the cursor was, how big the surface was, and which surface it was when the current
+    /// resize began. Nil while no resize is in flight; `resizePanel` reads it to keep
+    /// content-driven size reports anchored at the surface's top-left corner for the duration.
+    private var resizeAnchor: (mouse: CGPoint, size: CGSize, surface: ResizableSurface)?
+
+    /// Resizes the surface on screen (result card or search palette) as one of its handles is
+    /// dragged. Mirrors `handleCardDrag`: the new size comes from the *absolute* cursor position
+    /// against the anchor taken at `.began` (the dragged edge moves out from under the pointer, so
+    /// the gesture's own translation would fight it), the surface's top-left corner stays fixed,
+    /// and the size is clamped to the surface minimum and to the screen. `.ended` remembers the
+    /// size under the surface's keys. `mouseLocation` is injectable so the geometry is testable
+    /// without a real cursor. Internal for tests.
+    func handleResize(_ edge: PopupResizeEdge, phase: ResultCardDragPhase, mouseLocation: CGPoint? = nil) {
+        guard let panel, let surface = resizableSurface else { return }
+        let mouse = mouseLocation ?? NSEvent.mouseLocation
+        switch phase {
+        case .began:
+            // Same panel state as a move: no hover-driven click-through mid-drag, and neither
+            // re-centering nor bottom-pinning fighting the top-left-anchored frames set below.
+            panel.prepareForUserDrag()
+            panel.pinBottomEdgeOnResize = false
+            panel.releasesBottomPinAfterGrowth = false
+            // The drag starts from the size on screen — smaller than the remembered maximum when
+            // the content did not need all of it — so the handle stays under the pointer. From
+            // here on the surface renders the dragged size verbatim, for the rest of its session.
+            modeStore.isSurfaceUserSized = true
+            resizeAnchor = (mouse: mouse, size: currentSurfaceSize(in: panel), surface: surface)
+        case .changed:
+            guard let anchor = resizeAnchor, anchor.surface == surface else { return }
+            let proposed = PopupResizeGeometry.size(
+                from: anchor.size, edge: edge, anchorMouse: anchor.mouse, mouse: mouse)
+            let size = PopupResizeGeometry.clamp(
+                proposed,
+                minSize: surface.minSize,
+                panelTopLeft: CGPoint(x: panel.frame.minX, y: panel.frame.maxY),
+                screenBounds: screenBounds(for: panel))
+            applySize(size, for: surface, to: panel)
+        case .ended:
+            guard let anchor = resizeAnchor, anchor.surface == surface else { return }
+            resizeAnchor = nil
+            panel.endUserDrag()
+            // The dragged size is what the surface keeps until it closes (`isSurfaceUserSized`
+            // stays set), and the maximum the next one opens with.
+            if let size = liveSize(for: surface) {
+                settingsStore.set(surface.widthKey, value: Double(size.width))
+                settingsStore.set(surface.heightKey, value: Double(size.height))
+            }
+        }
+    }
+
+    /// The surface's on-screen size derived from the panel frame (the panel is the surface plus
+    /// the transparent shadow ring on every side). A surface's default size is never reported to
+    /// the controller, so this is how the first resize of a session learns where it starts.
+    private func currentSurfaceSize(in panel: PopupPanel) -> CGSize {
+        let ring = 2 * PopupMetrics.popupShadowInset
+        return CGSize(width: panel.frame.width - ring, height: panel.frame.height - ring)
+    }
+
+    /// Applies a size: the surface reads it from the store, and the panel is set to the surface
+    /// plus its shadow ring with the top-left corner fixed (the handles sit on the right/bottom
+    /// edges). The hosting view's own top-anchored auto-resize then lands on this same frame.
+    private func applySize(_ size: CGSize, for surface: ResizableSurface, to panel: PopupPanel) {
+        setLiveSize(size, for: surface)
+        let ring = 2 * PopupMetrics.popupShadowInset
+        let panelSize = CGSize(width: size.width + ring, height: size.height + ring)
+        panel.setFrame(CGRect(x: panel.frame.minX, y: panel.frame.maxY - panelSize.height,
+                              width: panelSize.width, height: panelSize.height), display: true)
     }
 
     /// Collapses the result card back to the actions bar. Never hides the popup.
     public func exitContent() {
         guard modeStore.mode == .content else { return }
+        if refiningPrevious != nil {
+            // Leaving the card drops a follow-up in flight; the stream must not re-open it.
+            activeStreamingTask?.cancel()
+            activeStreamingTask = nil
+            refiningPrevious = nil
+            modeStore.isProcessingAI = false
+        }
+        cardConversation = nil
         modeStore.resultCard = nil
+        modeStore.resultCardSize = nil
+        modeStore.isSurfaceUserSized = false
+        modeStore.isCardPinned = false
+        resizeAnchor = nil
+        hasUserMovedCard = false
         modeStore.mode = .actions
         panel?.pinBottomEdgeOnResize = modeStore.searchResultsAbove
+        panel?.heightCap = PopupMetrics.popupMaxHeight
         exitKeyMode()
     }
 
@@ -597,26 +980,37 @@ public class PopupWindowController {
 
     // MARK: - Panel Resize
 
-    /// Resize the bar/search panel, keeping the field's edge fixed so entering search mode never
-    /// jumps the popup. With results below the field the field is at the palette top (anchor the top
-    /// edge, grow down); with results above the field the field is at the palette bottom (anchor the
-    /// bottom edge, grow up). Horizontal re-centering and screen/height clamping are handled by
-    /// `PopupPanel.setFrame`, which is the single funnel the hosting view's auto-resize also uses.
+    /// Resize the panel to its content, anchored the same way `PopupPanel.setFrame` anchors the
+    /// hosting view's own resizes: a resize drag in flight keeps the surface's top-left corner;
+    /// otherwise the panel's live bottom-edge pin decides (pinned when the popup sits low on screen,
+    /// so growth extends upward; else the top edge stays). Horizontal re-centering and screen/height
+    /// clamping are handled by `PopupPanel.setFrame`, the single funnel both paths go through.
     private func resizePanel(to proposedSize: CGSize) {
         guard let panel, panel.isVisible else { return }
         let size = sanitizedPopupSize(proposedSize)
         let current = panel.frame.size
         if abs(current.width - size.width) < 1, abs(current.height - size.height) < 1 { return }
-        if modeStore.searchResultsAbove {
-            // Field at the palette bottom: keep the bottom edge fixed, grow upward.
+        if resizeAnchor != nil {
+            // A resize handle is being dragged: the surface's top-left corner is the fixed point.
+            panel.setFrame(CGRect(x: panel.frame.minX, y: panel.frame.maxY - size.height,
+                                  width: size.width, height: size.height), display: true)
+        } else if panel.pinBottomEdgeOnResize {
+            // Bottom edge pinned (popup low on screen): keep it fixed, grow upward.
             panel.setFrame(CGRect(x: panel.frame.minX, y: panel.frame.minY,
                                   width: size.width, height: size.height), display: true)
         } else {
-            // Field at the palette top: keep the top edge fixed, grow downward.
+            // Keep the top edge fixed, grow downward.
             let newOriginY = panel.frame.maxY - size.height
             panel.setFrame(CGRect(x: panel.frame.minX, y: newOriginY,
                                   width: size.width, height: size.height), display: true)
         }
+    }
+
+    private func syncPanelAppearance(_ targetPanel: NSPanel) {
+        let appearanceToken = settingsStore.get(SettingKey.popupThemeColor)
+        let systemIsDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let isDark = PopupThemeModel.effectiveScheme(appearance: appearanceToken, systemIsDark: systemIsDark) == .dark
+        targetPanel.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
     }
 
     private func sanitizedPopupSize(_ raw: CGSize?) -> CGSize {
@@ -647,15 +1041,25 @@ public class PopupWindowController {
         activeLoadingTask?.cancel()
         activeLoadingTask = nil
         activeLoadingID = nil
+        // End the session (cancel in-flight work) but keep the warm inline-result caches so the
+        // next selection renders its preview immediately instead of re-evaluating from cold.
+        InlineResultEvaluator.shared.endSession(aiSessionID)
         aiSessionID = UUID()
+        refiningPrevious = nil
+        cardConversation = nil
 
         if toastController.currentFeedback?.keepVisible == true || toastController.isLoading {
             toastController.hide()
         }
         subBarController.hide()
+        tooltipController.hide()
         currentActions = nil
         modeStore.resultCard = nil
+        modeStore.resultCardSize = nil
+        modeStore.searchPaletteSize = nil
+        modeStore.isSurfaceUserSized = false
         modeStore.canPaste = nil
+        modeStore.inlineResults.removeAll()
         // A dismissed session must not leak its click intent into the next one (keyboard-driven
         // runs and any later snapshot read the last intent; force-copy must never persist). The
         // declared delivery is snapshotted per-perform, so a stale value must not leak either.
@@ -663,17 +1067,29 @@ public class PopupWindowController {
         pendingDelivery = nil
         pendingActionTitle = nil
         pendingActionIcon = nil
+        pendingActionID = nil
+        pendingActionRecommendedResult = nil
+        pendingActionOutputKind = nil
         accumulatedScrollDelta = 0
         isRightClickInProgress = false
         modeStore.isProcessingAI = false
         modeStore.mode = .actions
+        PaletteRowShortcuts.setActive(false)
         modeStore.isSubBarActive = false
         modeStore.activeSubGroupID = nil
         modeStore.scope = nil
         panel?.pinBottomEdgeOnResize = false
+        panel?.releasesBottomPinAfterGrowth = false
         panel?.horizontalAnchor = .none
+        panel?.heightCap = PopupMetrics.popupMaxHeight
+        panel?.endUserDrag()
+        cardDragAnchor = nil
+        resizeAnchor = nil
+        hasUserMovedCard = false
+        modeStore.isCardPinned = false
         preSearchFrame = nil
         openedDirectlyInSearch = false
+        sessionShowTime = 0
         panel?.ignoresMouseEvents = false // clear any hover-driven click-through from the last session
         exitKeyMode() // allowsKey=false + reactivate previousFrontmostApp
         previousFrontmostApp = nil // hide() is the only thing that ends the key-mode session
@@ -725,6 +1141,7 @@ public class PopupWindowController {
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidBeginTracking), name: NSMenu.didBeginTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidEndTracking), name: NSMenu.didEndTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidDeactivate), name: NSApplication.didResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowDidResignKey(_:)), name: NSWindow.didResignKeyNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(workspaceDidActivateApp(_:)), name: NSWorkspace.didActivateApplicationNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(workspaceActiveSpaceDidChange), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
     }
@@ -748,6 +1165,25 @@ public class PopupWindowController {
         }
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    /// Runs the palette row a global ⌘-digit hot key points at (1-based), returning false when
+    /// there is no palette or no such row. The row list lives in the SwiftUI palette, so this
+    /// reaches it through the catcher view mounted in the panel — the same walk `focusSearchField`
+    /// uses to find the text field. Internal for tests.
+    func runPaletteRow(_ row: Int) -> Bool {
+        guard modeStore.mode == .search, let panel,
+              let catcher = Self.findCommandDigitCatcher(in: panel.contentView) else { return false }
+        return catcher.run(row: row)
+    }
+
+    private static func findCommandDigitCatcher(in view: NSView?) -> CommandDigitCatcher.CatcherView? {
+        guard let view else { return nil }
+        if let catcher = view as? CommandDigitCatcher.CatcherView { return catcher }
+        for subview in view.subviews {
+            if let found = findCommandDigitCatcher(in: subview) { return found }
+        }
+        return nil
     }
 
     func handleEvent(_ event: NSEvent) {
@@ -806,7 +1242,7 @@ public class PopupWindowController {
             // SwiftUI Button) delivers as a copy when ⇧ is held.
             let isShift = event.modifierFlags.contains(.shift)
             pendingClickIntent = isShift ? .secondary : .primary
-            if !inMain && !inSub {
+            if !inMain && !inSub && !cardIsModal {
                 hide()
             }
         case .rightMouseDown:
@@ -820,7 +1256,7 @@ public class PopupWindowController {
                 isRightClickInProgress = true
             } else {
                 isRightClickInProgress = false
-                hide()
+                if !cardIsModal { hide() }
             }
         case .rightMouseUp:
             guard isRightClickInProgress else { break }
@@ -871,8 +1307,14 @@ public class PopupWindowController {
             // SwiftUI (M8).
             if modeStore.mode == .search { break }
             if modeStore.mode == .content {
-                return   // Esc belongs to the card component (SwiftUI .onKeyPress);
-                         // the global monitor stays observation-only — do NOT handle Esc here (M8)
+                // Esc belongs to the card component (SwiftUI .onKeyPress) — do NOT handle it here
+                // while the panel is key, or it double-fires on top of SwiftUI (M8). The card now
+                // survives a click into another app, though, and a panel that lost key never sees
+                // the keystroke: that is the one case the monitor answers Esc itself.
+                if event.keyCode == 53, panel?.isKeyWindow != true {
+                    hide()
+                }
+                return
             }
             // Sub-bar Escape: when a sub-bar is open, Escape closes it instead of
             // dismissing the entire popup. The next Escape will dismiss the popup.
@@ -918,7 +1360,7 @@ public class PopupWindowController {
         // without it the local monitor is the only way to notice the pointer re-entering the
         // content area, and ignoring events would strand the panel permanently inert.
         let overContent = isOverPanelContent(screenLocation)
-        if PopupHoverState.shared.usesGlobalMouseMonitoring {
+        if PopupHoverState.shared.usesGlobalMouseMonitoring, !panel.isUserDragging {
             panel.ignoresMouseEvents = !overContent
         }
         if overContent {
@@ -1017,8 +1459,18 @@ public class PopupWindowController {
     
     @objc private func appDidDeactivate() {
         // A right-click fires didResignActiveNotification before rightMouseUp arrives; suppressing
-        // hide() here lets the right-click path complete on mouse-up as intended.
-        if !isMenuTracking && !isRightClickInProgress {
+        // hide() here lets the right-click path complete on mouse-up as intended. The result card
+        // outlives focus changes entirely (`cardIsModal`).
+        if !isMenuTracking && !isRightClickInProgress && !cardIsModal {
+            hide()
+        }
+    }
+
+    @objc private func windowDidResignKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === panel else { return }
+        // When the panel is key (search mode or content mode), clicking on another window
+        // causes it to resign key. Dismiss immediately unless modal.
+        if !cardIsModal {
             hide()
         }
     }
@@ -1027,10 +1479,16 @@ public class PopupWindowController {
         guard let app = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
             ?? NSWorkspace.shared.frontmostApplication else { return }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
-        if let sourceBundleID = currentContext?.sourceApp.bundleIdentifier,
-           app.bundleIdentifier == sourceBundleID {
+        // Grace period: when a clipboard manager (Paste, Raycast, Maccy) dismisses itself, macOS
+        // delivers a queued didActivateApplication for the destination app. If the popup just
+        // opened (< 300 ms ago) this is almost certainly a leftover transition notification —
+        // not an intentional user focus switch — so suppress the dismissal.
+        if sessionShowTime > 0,
+           (ProcessInfo.processInfo.systemUptime - sessionShowTime) < PopupMetrics.focusSwitchGracePeriod {
             return
         }
+        // Modal result cards survive focus changes (parity with appDidDeactivate).
+        if cardIsModal { return }
         if !isRightClickInProgress {
             hide()
         }
@@ -1047,6 +1505,31 @@ public class PopupWindowController {
         let viewRect = NSRect(x: hoverFrame.minX, y: hoverFrame.minY, width: hoverFrame.width, height: hoverFrame.height)
         let windowRect = contentView.convert(viewRect, to: nil)
         return panel.convertToScreen(windowRect)
+    }
+
+    // MARK: - Tooltip Presentation
+
+    /// Presents a bar button's hover tooltip in the screen-space tooltip window. Converts the
+    /// button frame from popupHoverSpace to screen coordinates and hands the expanded sub-bar's
+    /// frame to the placer as an avoidance rect, so the tooltip flips below the bar instead of
+    /// colliding with the sub-bar (or being clamped on top of the bar's own buttons, the old
+    /// in-panel behavior).
+    private func presentTooltip(text: String, localFrame: CGRect, effectiveTheme: String, isDark: Bool) {
+        guard let panel, panel.isVisible else { return }
+        let targetScreenFrame = convertHoverFrameToScreen(localFrame)
+        guard !targetScreenFrame.isEmpty else { return }
+        var avoidanceRects: [CGRect] = []
+        if subBarController.isShowing {
+            avoidanceRects.append(subBarController.panelFrame)
+        }
+        tooltipController.show(
+            text: text,
+            targetScreenFrame: targetScreenFrame,
+            avoidanceRects: avoidanceRects,
+            effectiveTheme: effectiveTheme,
+            isDark: isDark,
+            maxWidth: panel.frame.width - 32
+        )
     }
 
     private func handleSubBarToggle(for action: any Action, index: Int, frame: CGRect) {
@@ -1112,6 +1595,7 @@ public class PopupWindowController {
             scale: scale,
             context: context,
             presenter: ActionCustomizationManager.shared,
+            modeStore: modeStore,
             onResult: { [weak self] result in
                 self?.subBarController.hide()
                 self?.modeStore.isSubBarActive = false
@@ -1127,19 +1611,22 @@ public class PopupWindowController {
                 let prompt = AIServiceManager.shared.promptForPreset(preset)
                 self.runAIPreset(prompt: prompt, title: preset.title)
             },
-            onRunLoadingAction: { [weak self] action in
+            onRunLoadingAction: { [weak self] action, clickIntent in
                 guard let self, let context = self.currentActionContext else { return }
                 self.subBarController.hide()
                 self.modeStore.isSubBarActive = false
                 self.modeStore.activeSubGroupID = nil
-                self.runLoadingAction(action, with: context, isSecondaryClick: self.pendingClickIntent == .secondary)
+                self.runLoadingAction(action, with: context, isSecondaryClick: clickIntent == .secondary)
             },
-            onWillPerformAction: { [weak self] action in
+            onWillPerformAction: { [weak self] action, clickIntent in
                 guard let self else { return }
                 self.pendingDelivery = action.delivery
                 self.pendingActionTitle = action.title
                 self.pendingActionIcon = action.displayIcon(using: ActionCustomizationManager.shared)
-                self.inFlightDeliveryContext = self.deliverySnapshot(for: action)
+                self.pendingActionID = action.id
+                self.pendingActionRecommendedResult = action.chrome.recommendedResult
+                self.pendingActionOutputKind = action.chrome.outputKind
+                self.inFlightDeliveryContext = self.deliverySnapshot(for: action, clickIntent: clickIntent)
             },
             onActionPerformed: { [weak self] actionID in
                 self?.usageStore.record(actionID)
@@ -1149,7 +1636,308 @@ public class PopupWindowController {
         modeStore.subBarAbove = actuallyAbove
     }
 
-    func runAIPreset(prompt: String, title: String) {
+    /// The frontmost app at the moment an in-place answer lands — pasting is only safe into the
+    /// app the selection came from. Settable for tests.
+    var frontmostBundleIDProvider: @MainActor () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+
+    /// Runs a palette instruction on the selection (or standalone without context if `includeContext` is false).
+    /// `replace` pastes the answer over the selection (⏎); otherwise the answer streams into the result card (⇧⏎),
+    /// titled after the instruction.
+    func runAIPrompt(_ instruction: String, replace: Bool, includeContext: Bool = true) {
+        let prompt = PaletteAIPrompt.instruction(from: instruction)
+        guard !prompt.isEmpty else { return }
+        let taskPrompt = includeContext
+            ? PaletteAIPrompt.askAITaskPrompt(for: prompt)
+            : PaletteAIPrompt.standaloneQuestionPrompt(for: prompt)
+        let inputText: String? = includeContext ? nil : ""
+        if replace {
+            Log.ai.notice("Running a palette AI prompt, replacing the selection")
+            runAIPromptReplacing(prompt: taskPrompt, inputText: inputText)
+        } else {
+            Log.ai.notice("Running a palette AI prompt into the result card")
+            runAIPreset(prompt: taskPrompt, title: PaletteAIPrompt.toolTitle(for: prompt), inputText: inputText)
+        }
+    }
+
+    /// Saves a palette instruction as a custom AI tool, then runs it with the same ⏎/⇧⏎ meaning
+    /// as `runAIPrompt`. The tool is a regular custom preset: searchable in the palette, listed
+    /// in the AI sub-bar and in Preferences → AI → Actions where it can be renamed, re-prompted or
+    /// deleted. A prompt that is already saved reuses its tool rather than minting a duplicate.
+    /// The saved tool is recorded as used so it ranks first among equals the next time it is searched.
+    func saveAndRunAIPrompt(_ instruction: String, replace: Bool) {
+        let prompt = PaletteAIPrompt.instruction(from: instruction)
+        guard !prompt.isEmpty else { return }
+        let manager = AIServiceManager.shared
+        let existing = manager.preset(matchingPrompt: prompt)
+        var preset = existing ?? manager.addCustomPreset(title: PaletteAIPrompt.toolTitle(for: prompt), prompt: prompt)
+        usageStore.record(AIAction(presetID: preset.id, title: preset.title).id)
+        if existing == nil {
+            Log.ai.notice("Saved a palette prompt as AI tool \(preset.id, privacy: .public)")
+        }
+
+        let taskPrompt = PaletteAIPrompt.saveToolTaskPrompt(for: prompt)
+        let onTitle: (String) -> Void = { cleanTitle in
+            let trimmed = cleanTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != preset.title else { return }
+            preset.title = trimmed
+            manager.updatePreset(preset)
+        }
+
+        if replace {
+            runAIPromptReplacing(
+                prompt: taskPrompt,
+                loadingMessage: existing == nil ? String(localized: "Saved as AI tool · Replacing…") : nil,
+                onGeneratedTitle: onTitle
+            )
+        } else {
+            runAIPreset(
+                prompt: taskPrompt,
+                title: preset.title,
+                loadingMessage: existing == nil ? String(localized: "Saved as AI tool · Generating…") : nil,
+                onGeneratedTitle: onTitle
+            )
+        }
+    }
+
+    /// Runs `prompt` on the selection and pastes the answer over it — no card. The popup hides,
+    /// a cancellable "Replacing…" toast waits for the whole answer, and the answer goes through
+    /// the explicit paste door (`handleActionResult(.paste)`, no delivery re-decision) under a
+    /// success toast. The answer is copied instead when the unified paste availability says the
+    /// target can't paste, or when the frontmost app is no longer the selection's app.
+    func runAIPromptReplacing(prompt: String, loadingMessage: String? = nil, inputText: String? = nil, onGeneratedTitle: ((String) -> Void)? = nil) {
+        guard let context = currentActionContext else {
+            Log.ai.error("Cannot replace with AI: currentActionContext is nil")
+            return
+        }
+        activeStreamingTask?.cancel()
+        activeStreamingTask = nil
+
+        let selection = context.selection
+        let selectionText = inputText ?? selection.text
+        let anchorFrame = panel?.frame ?? lastPopupFrame
+        let targetCanPaste = PasteAvailability.effective(policy: selection.appPolicy, probe: modeStore.canPaste)
+        let sourceBundleID = selection.sourceApp.bundleIdentifier
+
+        hide()
+        let session = aiSessionID
+        toastController.showLoading(message: loadingMessage ?? String(localized: "Replacing…"), anchorFrame: anchorFrame) { [weak self] in
+            self?.cancelActiveTasks()
+        }
+
+        let task = Task { @MainActor in
+            self.modeStore.isProcessingAI = true
+            defer {
+                if !Task.isCancelled {
+                    self.activeStreamingTask = nil
+                    self.modeStore.isProcessingAI = false
+                }
+            }
+            do {
+                let provider = AIServiceManager.shared.currentProvider
+                var accumulated = ""
+                for try await chunk in provider.processStream(prompt: prompt, text: selectionText) {
+                    guard !Task.isCancelled, session == self.aiSessionID else {
+                        self.toastController.hide()
+                        return
+                    }
+                    accumulated += chunk
+                    if let generated = AIRequestSupport.extractTitleText(accumulated), !generated.isEmpty {
+                        onGeneratedTitle?(generated)
+                    }
+                }
+                guard !Task.isCancelled, session == self.aiSessionID else {
+                    self.toastController.hide()
+                    return
+                }
+                if let generated = AIRequestSupport.extractTitleText(accumulated), !generated.isEmpty {
+                    onGeneratedTitle?(generated)
+                }
+                let answer = AIRequestSupport.extractResultText(accumulated)
+                guard !answer.isEmpty else { throw AIError.invalidResponse }
+                let stillInSourceApp = sourceBundleID == nil || self.frontmostBundleIDProvider() == sourceBundleID
+                let pastes = targetCanPaste != false && stillInSourceApp
+                self.handleActionResult(pastes ? .paste(answer) : .copy(answer), delivery: nil, suppressDeliveryToast: true)
+                let message = pastes
+                    ? String(localized: "Replaced with AI result")
+                    : (stillInSourceApp ? String(localized: "Copied AI result") : String(localized: "Copied — the app changed"))
+                self.toastController.show(StatusFeedback(message: message, style: .success, symbolName: "sparkle"), anchorFrame: anchorFrame)
+            } catch is CancellationError {
+                self.toastController.hide()
+            } catch let error as AIError where error == .cancelled {
+                self.toastController.hide()
+            } catch {
+                guard !Task.isCancelled, session == self.aiSessionID else {
+                    self.toastController.hide()
+                    return
+                }
+                Log.ai.error("Replacing with AI failed: \(error.localizedDescription)")
+                self.toastController.show(StatusFeedback(error: error), anchorFrame: anchorFrame)
+            }
+        }
+        activeStreamingTask = task
+    }
+
+    /// Runs an instruction typed into the card's follow-up field on the card's current text: a
+    /// second pass over an answer ("shorter", "in Slovak"). The card re-streams in place, titled
+    /// after the instruction, and diffs against the text the instruction ran on.
+    func runFollowUp(_ instruction: String) {
+        guard let card = modeStore.resultCard, !card.isStreaming, !card.isError, currentActionContext != nil else { return }
+        let prompt = PaletteAIPrompt.instruction(from: instruction)
+        guard !prompt.isEmpty else { return }
+        Log.ai.notice("Running a follow-up instruction in the result card")
+        refineCard(card, prompt: prompt, title: PaletteAIPrompt.toolTitle(for: prompt))
+    }
+
+    /// The card a follow-up is refining, kept so a cancel or a failure puts it back. Non-nil
+    /// exactly while a follow-up is in flight.
+    private var refiningPrevious: ResultCardPayload?
+
+    /// What the card has done in this session — the selection and each instruction with its
+    /// result — handed to follow-ups as labelled history. Seeded by the run that opened the card,
+    /// extended by every settled follow-up, cleared when the card goes away. Internal for tests.
+    private(set) var cardConversation: AIConversation?
+
+    /// Runs a follow-up *inside* the card. Unlike a preset run, nothing hides and no loading
+    /// toast shows: the card stays on screen with the previous answer dimmed under the field's
+    /// spinner (`isRefining`) until the first chunk, then streams the new answer in place and
+    /// settles with the diff against the original selection. Esc cancels, a failure restores the
+    /// previous answer under an error toast, and leaving content mode drops the stream.
+    private func refineCard(_ previous: ResultCardPayload, prompt: String, title: String) {
+        activeStreamingTask?.cancel()
+        activeStreamingTask = nil
+        let session = aiSessionID
+        let sourceText = previous.text
+        // The history rides along as labelled context; the current instruction stays the task.
+        let conversation = cardConversation
+            ?? AIConversation(original: previous.original ?? sourceText, steps: [])
+        let followUpTask = conversation.followUpTask(current: prompt)
+        refiningPrevious = previous
+        modeStore.isProcessingAI = true
+        freezeCardSizeForRefinement()
+        modeStore.resultCard = ResultCardPayload(
+            text: sourceText,
+            isError: false,
+            title: title,
+            icon: nil,
+            isStreaming: true,
+            original: previous.original,
+            isRefining: true
+        )
+
+        let task = Task { @MainActor in
+            defer {
+                if !Task.isCancelled {
+                    self.activeStreamingTask = nil
+                    self.modeStore.isProcessingAI = false
+                }
+            }
+            // The card is the only place this run renders: once the user has left content mode
+            // (back chevron) or the session ended, every later chunk is dropped.
+            @MainActor func stillRefining() -> Bool {
+                if Task.isCancelled { return false }
+                if session != self.aiSessionID { return false }
+                if self.modeStore.mode != .content { return false }
+                return self.refiningPrevious != nil
+            }
+            do {
+                let provider = AIServiceManager.shared.currentProvider
+                var accumulated = ""
+                var activeTitle = title
+                for try await chunk in provider.processStream(prompt: followUpTask, text: sourceText) {
+                    guard stillRefining() else { return }
+                    accumulated += chunk
+                    if let newTitle = AIRequestSupport.extractTitleText(accumulated), !newTitle.isEmpty {
+                        activeTitle = newTitle
+                    }
+                    let cleaned = AIRequestSupport.extractResultText(accumulated)
+                    if !cleaned.isEmpty {
+                        self.showResultCard(text: cleaned, isError: false, title: activeTitle, isStreaming: true, session: session, originalText: previous.original, overrideOriginal: true)
+                    }
+                }
+                guard stillRefining() else { return }
+                if let newTitle = AIRequestSupport.extractTitleText(accumulated), !newTitle.isEmpty {
+                    activeTitle = newTitle
+                }
+                let finalResponse = AIRequestSupport.extractResultText(accumulated)
+                if finalResponse.isEmpty {
+                    self.restoreRefiningCard()
+                    self.toastController.show(StatusFeedback(message: String(localized: "No response generated"), style: .error), anchorFrame: self.panel?.frame)
+                } else {
+                    self.refiningPrevious = nil
+                    self.cardConversation = conversation.appending(instruction: prompt, result: finalResponse)
+                    self.showResultCard(text: finalResponse, isError: false, title: activeTitle, isStreaming: false, session: session, originalText: previous.original, overrideOriginal: true)
+                }
+            } catch is CancellationError {
+                // cancelFollowUp / hide already put the card back or took it down.
+            } catch let error as AIError where error == .cancelled {
+                // same
+            } catch {
+                guard stillRefining() else { return }
+                Log.ai.error("Follow-up failed in the result card: \(error.localizedDescription)")
+                self.restoreRefiningCard()
+                self.toastController.show(StatusFeedback(error: error), anchorFrame: self.panel?.frame)
+            }
+        }
+        activeStreamingTask = task
+    }
+
+    /// Pins the card to the exact size it has right now for the rest of its life on screen. The
+    /// card is content-sized — as wide as its longest line, as tall as the wrapped text — so a
+    /// refinement streaming in would otherwise re-measure it on every chunk and make the card
+    /// jump around under the user's eyes. The frozen size takes the same path as a hand-resized
+    /// card (`isSurfaceUserSized` + `resultCardSize`): the body scrolls if the new answer needs
+    /// more room, the user can still drag the handles, and nothing is persisted. A card the user
+    /// already resized is left alone; a test panel too small to be a card is ignored.
+    private func freezeCardSizeForRefinement() {
+        guard !modeStore.isSurfaceUserSized, let panel else { return }
+        let frozen = Self.cardSize(forPanelSize: panel.frame.size)
+        guard frozen.width >= PopupMetrics.aiCardMinWidth, frozen.height >= PopupMetrics.aiCardMinHeight else { return }
+        modeStore.resultCardSize = frozen
+        modeStore.isSurfaceUserSized = true
+    }
+
+    /// The card's size inside a panel frame: the panel minus the transparent shadow ring.
+    static func cardSize(forPanelSize size: CGSize) -> CGSize {
+        CGSize(width: size.width - 2 * PopupMetrics.popupShadowInset, height: size.height - 2 * PopupMetrics.popupShadowInset)
+    }
+
+    /// Puts the answer the follow-up was refining back, settled, with the field focused again.
+    private func restoreRefiningCard() {
+        guard let previous = refiningPrevious else { return }
+        refiningPrevious = nil
+        modeStore.isProcessingAI = false
+        showResultCard(text: previous.text, isError: previous.isError, title: previous.title, icon: previous.icon, isStreaming: false, session: aiSessionID, originalText: previous.original, overrideOriginal: true, canFollowUp: previous.canFollowUp)
+    }
+
+    /// Esc while a follow-up streams: stop it and keep the previous answer on screen.
+    func cancelFollowUp() {
+        guard refiningPrevious != nil else { return }
+        Log.ai.info("Follow-up cancelled in the result card")
+        activeStreamingTask?.cancel()
+        activeStreamingTask = nil
+        restoreRefiningCard()
+    }
+
+    /// Focuses the card's instruction field on the next run-loop turn (a `@FocusState` request
+    /// during the mode-change render is dropped on macOS, same as the search field). The card's
+    /// selectable body is an AppKit text view too; only the instruction field is editable.
+    private func focusCardField() {
+        guard let panel, panel.isVisible, modeStore.mode == .content else { return }
+        guard let field = Self.findEditableTextField(in: panel.contentView) else { return }
+        panel.makeFirstResponder(field)
+    }
+
+    /// The first editable text field in a view tree (the result card's follow-up field), or nil.
+    static func findEditableTextField(in view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for subview in view.subviews {
+            if let found = findEditableTextField(in: subview) { return found }
+        }
+        return nil
+    }
+
+    func runAIPreset(prompt: String, title: String, loadingMessage: String? = nil, inputText: String? = nil, onGeneratedTitle: ((String) -> Void)? = nil) {
         guard let context = currentActionContext else {
             Log.ai.error("Cannot run AI preset: currentActionContext is nil")
             return
@@ -1158,13 +1946,16 @@ public class PopupWindowController {
         activeStreamingTask = nil
 
         let selection = context.selection
-        let selectionText = selection.text
+        let selectionText = inputText ?? selection.text
+        let originalForCard = inputText != nil ? (inputText!.isEmpty ? nil : inputText) : nil
+        let overrideOriginal = inputText != nil
         let anchorFrame = panel?.frame ?? lastPopupFrame
+        let targetCanPaste = PasteAvailability.effective(policy: selection.appPolicy, probe: modeStore.canPaste)
 
         hide()
         let session = aiSessionID
 
-        toastController.showLoading(message: String(localized: "Generating…"), anchorFrame: anchorFrame) { [weak self] in
+        toastController.showLoading(message: loadingMessage ?? String(localized: "Generating…"), anchorFrame: anchorFrame) { [weak self] in
             self?.cancelActiveTasks()
         }
 
@@ -1178,19 +1969,10 @@ public class PopupWindowController {
             }
 
             var hasYielded = false
+            var activeTitle = title
 
             do {
                 let provider = AIServiceManager.shared.currentProvider
-                if provider.type == .browser {
-                    _ = try await provider.process(prompt: prompt, text: selectionText)
-                    guard !Task.isCancelled, session == self.aiSessionID else {
-                        self.toastController.hide()
-                        return
-                    }
-                    self.toastController.hide()
-                    self.deliverResult(.success)
-                    return
-                }
 
                 var accumulated = ""
 
@@ -1200,16 +1982,20 @@ public class PopupWindowController {
                         return
                     }
                     accumulated += chunk
+                    if let newTitle = AIRequestSupport.extractTitleText(accumulated), !newTitle.isEmpty {
+                        activeTitle = newTitle
+                        onGeneratedTitle?(newTitle)
+                    }
                     let cleaned = AIRequestSupport.extractResultText(accumulated)
                     if !cleaned.isEmpty {
                         if !hasYielded {
                             hasYielded = true
                             self.toastController.hide()
-                            let canPaste = await self.pasteProbe.canPaste(in: NSWorkspace.shared.frontmostApplication, policy: selection.appPolicy) ?? false
+                            let canPaste = targetCanPaste
                             guard !Task.isCancelled, session == self.aiSessionID else { return }
                             self.show(for: selection, pasteAvailable: canPaste, preservingSessionID: session, streamingTask: self.activeStreamingTask)
                         }
-                        self.showResultCard(text: cleaned, isError: false, title: title, isStreaming: true, session: session)
+                        self.showResultCard(text: cleaned, isError: false, title: activeTitle, isStreaming: true, session: session, originalText: originalForCard, overrideOriginal: overrideOriginal)
                     }
                 }
 
@@ -1218,21 +2004,32 @@ public class PopupWindowController {
                     return
                 }
                 self.toastController.hide()
+                if let newTitle = AIRequestSupport.extractTitleText(accumulated), !newTitle.isEmpty {
+                    activeTitle = newTitle
+                    onGeneratedTitle?(newTitle)
+                }
                 let finalResponse = AIRequestSupport.extractResultText(accumulated)
                 if finalResponse.isEmpty {
                     if !hasYielded {
-                        let canPaste = await self.pasteProbe.canPaste(in: NSWorkspace.shared.frontmostApplication, policy: selection.appPolicy) ?? false
+                        let canPaste = targetCanPaste
                         guard !Task.isCancelled, session == self.aiSessionID else { return }
                         self.show(for: selection, pasteAvailable: canPaste, preservingSessionID: session, streamingTask: self.activeStreamingTask)
-                        self.showResultCard(text: "No response generated", isError: true, title: title, isStreaming: false, session: session)
+                        self.showResultCard(text: "No response generated", isError: true, title: activeTitle, isStreaming: false, session: session, originalText: originalForCard, overrideOriginal: overrideOriginal)
                     }
                 } else {
                     if !hasYielded {
-                        let canPaste = await self.pasteProbe.canPaste(in: NSWorkspace.shared.frontmostApplication, policy: selection.appPolicy) ?? false
+                        let canPaste = targetCanPaste
                         guard !Task.isCancelled, session == self.aiSessionID else { return }
                         self.show(for: selection, pasteAvailable: canPaste, preservingSessionID: session, streamingTask: self.activeStreamingTask)
                     }
-                    self.showResultCard(text: finalResponse, isError: false, title: title, isStreaming: false, session: session)
+                    // A fresh run on the selection starts the card's session history; follow-ups
+                    // (refineCard) extend it.
+                    if inputText == nil {
+                        self.cardConversation = AIConversation(original: selectionText, steps: [.init(instruction: prompt, result: finalResponse)])
+                    } else {
+                        self.cardConversation = AIConversation(original: finalResponse, steps: [.init(instruction: prompt, result: finalResponse)])
+                    }
+                    self.showResultCard(text: finalResponse, isError: false, title: activeTitle, isStreaming: false, session: session, originalText: originalForCard, overrideOriginal: overrideOriginal)
                 }
             } catch is CancellationError {
                 Log.ai.info("AI streaming cancelled")
@@ -1245,12 +2042,12 @@ public class PopupWindowController {
                 self.toastController.hide()
                 Log.ai.error("AI preset execution failed: \(error.localizedDescription)")
                 if !hasYielded {
-                    let canPaste = await self.pasteProbe.canPaste(in: NSWorkspace.shared.frontmostApplication, policy: selection.appPolicy) ?? false
+                    let canPaste = targetCanPaste
                     guard !Task.isCancelled, session == self.aiSessionID else { return }
                     self.show(for: selection, pasteAvailable: canPaste, preservingSessionID: session, streamingTask: self.activeStreamingTask)
                 }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.showResultCard(text: message, isError: true, title: title, isStreaming: false, session: session)
+                self.showResultCard(text: message, isError: true, title: title, isStreaming: false, session: session, originalText: originalForCard, overrideOriginal: overrideOriginal)
             }
         }
         activeStreamingTask = task
@@ -1276,9 +2073,12 @@ public class PopupWindowController {
         /// `exitKeyMode()` reactivates exactly this app on hide — so the snapshot is the same app
         /// `pasteProbe` must inspect, without reading frontmost state after hide or an await.
         let application: NSRunningApplication?
-        /// The user's chosen behavior for this click (preview/paste/copy), resolved from the two
-        /// General-tab settings at snapshot time.
-        let preference: ResultDeliveryPreference
+        /// The user's per-action override if one was configured in Action Editor.
+        let userOverride: ResultDeliveryPreference?
+        /// The author's recommended delivery mode.
+        let recommendedResult: ActionResultDeliveryMode?
+        /// The action's uncommitted output kind.
+        let outputKind: ActionOutputKind?
         /// The performing action's title — the result card header. nil for explicit user requests.
         let actionTitle: String?
         /// The performing action's display icon (customization-resolved) — the result card header
@@ -1297,13 +2097,19 @@ public class PopupWindowController {
         let actionDelivery = action?.delivery ?? pendingDelivery
         let title = action?.title ?? pendingActionTitle
         let icon = action?.displayIcon(using: ActionCustomizationManager.shared) ?? pendingActionIcon
+        let actionID = action?.id ?? pendingActionID
         let targetApp = previousFrontmostApp ?? (frontmostApplicationProvider()?.bundleIdentifier != Bundle.main.bundleIdentifier ? frontmostApplicationProvider() : previousFrontmostApp)
+        let override = actionID.flatMap { ActionCustomizationManager.shared.override(for: $0)?.deliveryPreference }
+        let rec = action?.chrome.recommendedResult ?? pendingActionRecommendedResult
+        let outKind = action?.chrome.outputKind ?? pendingActionOutputKind
         return DeliveryContext(
             policy: currentActionContext?.selection.appPolicy ?? .default,
             clickIntent: intent,
             delivery: actionDelivery,
             application: targetApp,
-            preference: preference(for: intent),
+            userOverride: override,
+            recommendedResult: rec,
+            outputKind: outKind,
             actionTitle: title,
             actionIcon: icon,
             selection: currentActionContext?.selection
@@ -1336,6 +2142,9 @@ public class PopupWindowController {
         pendingDelivery = nil
         pendingActionTitle = nil
         pendingActionIcon = nil
+        pendingActionID = nil
+        pendingActionRecommendedResult = nil
+        pendingActionOutputKind = nil
         if shouldDismiss(result, delivery: resolvedDelivery) {
             hide()
         }
@@ -1386,11 +2195,46 @@ public class PopupWindowController {
                     if modeStore.canPaste == nil {
                         modeStore.canPaste = await pasteProbe.canPaste(in: delivery?.application, policy: delivery?.policy ?? .default) ?? false
                     }
-                    showResultCard(text: text, isError: false, title: delivery?.actionTitle ?? "Action", icon: delivery?.actionIcon, session: aiSessionID)
+                    showResultCard(text: text, isError: false, title: delivery?.actionTitle ?? "Action", icon: delivery?.actionIcon, session: aiSessionID, canFollowUp: false)
+                    return
+                }
+                if case .file(let filePayload) = resolved.result {
+                    showResultCard(
+                        text: filePayload.displayName,
+                        isError: false,
+                        title: delivery?.actionTitle ?? filePayload.displayName,
+                        icon: delivery?.actionIcon,
+                        session: aiSessionID,
+                        canFollowUp: false,
+                        file: filePayload
+                    )
                     return
                 }
                 try await resultHandler.handle(resolved.result, in: panel?.contentView)
-                if let toast = resolved.toast, !suppressDeliveryToast {
+                let toastToShow: StatusFeedback? = {
+                    if let toast = resolved.toast {
+                        if case .saveFile = resolved.result {
+                            let saveDir = settingsStore.get(.fileSaveLocation)
+                            let folderName = !saveDir.isEmpty ? URL(fileURLWithPath: (saveDir as NSString).expandingTildeInPath).lastPathComponent : "Downloads"
+                            return StatusFeedback(message: String(localized: "Saved to \(folderName)"), style: .success, symbolName: "arrow.down.circle")
+                        }
+                        return toast
+                    }
+                    if delivery == nil {
+                        switch resolved.result {
+                        case .saveFile:
+                            let saveDir = settingsStore.get(.fileSaveLocation)
+                            let folderName = !saveDir.isEmpty ? URL(fileURLWithPath: (saveDir as NSString).expandingTildeInPath).lastPathComponent : "Downloads"
+                            return StatusFeedback(message: String(localized: "Saved to \(folderName)"), style: .success, symbolName: "arrow.down.circle")
+                        case .copyFile:
+                            return StatusFeedback(message: String(localized: "Copied File"), style: .success, symbolName: "doc.on.doc")
+                        default:
+                            return nil
+                        }
+                    }
+                    return nil
+                }()
+                if let toast = toastToShow, !suppressDeliveryToast {
                     toastController.show(toast, anchorFrame: panel?.frame ?? lastPopupFrame)
                 }
             } catch {
@@ -1409,27 +2253,20 @@ public class PopupWindowController {
     /// any result.
     private func resolveDelivery(_ result: ActionResult, delivery: DeliveryContext?, suppressDeliveryToast: Bool = false) async -> (result: ActionResult, toast: StatusFeedback?) {
         guard let delivery else { return (result, nil) }
-        // A declared `.paste` secondary is pasted on a secondary click, so the probe must run for it
-        // too; likewise a `.text` result whose user preference is paste. The force-copy short-circuit
-        // below applies only when the click's outcome is a copy.
-        let declaredSecondaryIsPaste = delivery.clickIntent == .secondary && isPaste(delivery.delivery?.secondary)
-        let preference = delivery.preference
-        let declaredSecondaryOverrides = delivery.clickIntent == .secondary && delivery.delivery?.secondary != nil
-        let textPrefersPaste = isText(result) && preference == .paste && !declaredSecondaryOverrides
-        let couldPaste = isPaste(result) || declaredSecondaryIsPaste || textPrefersPaste
-        // The unified paste decision: per-app rules (assume/deny paste) answer definitively and
-        // skip the AX walk entirely (no Accessibility dependency for those apps); a force-copy click
-        // (a secondary click whose outcome is a copy — derived, or a non-paste declared secondary)
-        // also skips it (the outcome is a copy regardless). A declared `.paste` secondary or a
-        // `.text`+paste preference is the exception: the outcome is a paste, so the probe still runs.
-        // Otherwise probe the target app and treat unknown availability as cannot-paste — the safe
-        // default: never paste blindly when we cannot confirm the target supports it. The target is
-        // the snapshotted app captured before hide(), never frontmost state read after suspension.
+        let selected = ActionResultDelivery.select(
+            raw: result,
+            clickIntent: delivery.clickIntent,
+            delivery: delivery.delivery ?? .none,
+            preference: delivery.userOverride,
+            recommendedResult: delivery.recommendedResult,
+            outputKind: delivery.outputKind
+        )
+        let couldPaste = isPaste(selected)
         let isTargetActive = isTargetApplicationActive(delivery.application)
         let canPaste: Bool
         if !couldPaste || !isTargetActive {
-            canPaste = false // unused: `resolve` only consults it for a selected `.paste`, or target app inactive
-        } else if (delivery.clickIntent == .secondary && !(declaredSecondaryIsPaste || textPrefersPaste)) || !PasteAvailability.needsProbe(policy: delivery.policy) {
+            canPaste = false
+        } else if !PasteAvailability.needsProbe(policy: delivery.policy) {
             canPaste = PasteAvailability.effective(policy: delivery.policy, probe: nil) ?? false
         } else {
             canPaste = await pasteProbe.canPaste(in: delivery.application, policy: delivery.policy) ?? false
@@ -1439,22 +2276,21 @@ public class PopupWindowController {
             clickIntent: delivery.clickIntent,
             canPaste: canPaste,
             delivery: delivery.delivery ?? .none,
-            preference: preference
+            preference: delivery.userOverride,
+            recommendedResult: delivery.recommendedResult,
+            outputKind: delivery.outputKind
         )
         return (resolved.result, suppressDeliveryToast ? nil : resolved.toast)
     }
 
     private func isPaste(_ result: ActionResult?) -> Bool {
-        guard case .paste = result else { return false }
-        return true
-    }
-
-    /// Resolves the user's chosen behavior for a click from the two General-tab settings. Unknown
-    /// stored values fall back to the defaults (primary paste, secondary copy).
-    private func preference(for clickIntent: ActionResultDelivery.ClickIntent) -> ResultDeliveryPreference {
-        let key: SettingKey<String> = clickIntent == .primary ? .primaryClickBehavior : .secondaryClickBehavior
-        return ResultDeliveryPreference(rawValue: settingsStore.get(key))
-            ?? (clickIntent == .primary ? .paste : .copy)
+        guard let result else { return false }
+        switch result {
+        case .paste, .pasteContent:
+            return true
+        default:
+            return false
+        }
     }
 
     private func isText(_ result: ActionResult) -> Bool {
@@ -1463,7 +2299,7 @@ public class PopupWindowController {
     }
 
     /// Dismissal for a top-level result: the popup stays open exactly when the actual *resolved*
-    /// outcome is `.text` (preview) and dismisses otherwise. Mirroring the resolver's Select step
+    /// outcome is `.text` (preview) or `.file` and dismisses otherwise. Mirroring the resolver's Select step
     /// synchronously (before the delivery task runs) keeps dismissal consistent with the delivered
     /// outcome: a declared secondary beats the picker, so a `.text` raw result whose declared
     /// secondary dismisses still dismisses. `canPaste` is irrelevant here — every probe outcome
@@ -1474,10 +2310,30 @@ public class PopupWindowController {
             clickIntent: delivery.clickIntent,
             canPaste: false,
             delivery: delivery.delivery ?? .none,
-            preference: delivery.preference
+            preference: delivery.userOverride,
+            recommendedResult: delivery.recommendedResult,
+            outputKind: delivery.outputKind
         ).result
         if isText(resolved) { return false }
+        if case .file = resolved { return false }
         return resolved.dismissesPopup
+    }
+
+    /// Runs a leaf action from a per-action global hotkey. Reuses the on-screen session when the
+    /// popup is already up; otherwise opens on the retrieved selection so paste/preview still have
+    /// a delivery context, then performs.
+    func runBoundAction(_ action: any Action, with context: ActionContext, pasteAvailable: Bool? = nil) {
+        if panel?.isVisible != true {
+            show(for: context.selection, pasteAvailable: pasteAvailable)
+        } else if let pasteAvailable {
+            modeStore.canPaste = pasteAvailable
+        }
+        if ActionIdentity.isAIPreset(action) {
+            guard let preset = AIServiceManager.shared.preset(forActionID: action.id) else { return }
+            runAIPreset(prompt: AIServiceManager.shared.promptForPreset(preset), title: preset.title)
+            return
+        }
+        runAction(action, with: context, isSecondaryClick: false)
     }
 
     /// Performs an action directly (the right-click path, which the bar's SwiftUI Button never
@@ -1497,18 +2353,7 @@ public class PopupWindowController {
         // precedes it, so `pendingDelivery`/`pendingActionTitle` must stay untouched: a later
         // `deliverResult` (e.g. a completion-paste from a preview card) must never reuse this
         // perform's declaration.
-        let preference = preference(for: clickIntent)
-        let targetApp = previousFrontmostApp ?? (frontmostApplicationProvider()?.bundleIdentifier != Bundle.main.bundleIdentifier ? frontmostApplicationProvider() : previousFrontmostApp)
-        let delivery = DeliveryContext(
-            policy: context.selection.appPolicy,
-            clickIntent: clickIntent,
-            delivery: action.delivery,
-            application: targetApp,
-            preference: preference,
-            actionTitle: action.title,
-            actionIcon: action.displayIcon(using: ActionCustomizationManager.shared),
-            selection: context.selection
-        )
+        let delivery = deliverySnapshot(for: action, clickIntent: clickIntent)
         inFlightDeliveryContext = delivery
         usageStore.record(action.id)
         let match = action.matchInfo(for: context)
@@ -1520,7 +2365,19 @@ public class PopupWindowController {
         )
         Task { @MainActor in
             do {
-                let result = try await action.perform(performContext)
+                let result: ActionResult
+                if action.chrome.isInlineResult,
+                   let inFlightTask = InlineResultEvaluator.shared.runningTask(for: action.id, sessionID: self.aiSessionID) {
+                    if let text = await inFlightTask.value {
+                        result = .text(text)
+                    } else {
+                        result = try await action.perform(performContext)
+                    }
+                } else if action.chrome.isInlineResult, let cached = self.modeStore.inlineResults[action.id] {
+                    result = .text(cached)
+                } else {
+                    result = try await action.perform(performContext)
+                }
                 if self.shouldDismiss(result, delivery: delivery) {
                     self.hide()
                 }
@@ -1546,17 +2403,7 @@ public class PopupWindowController {
         // perform path's only consumer. Unlike the bar/search path, no `onWillPerformAction`
         // precedes it, so `pendingDelivery`/`pendingActionTitle` must stay untouched: a later
         // `deliverResult` must never reuse this perform's declaration.
-        let targetApp = previousFrontmostApp ?? (frontmostApplicationProvider()?.bundleIdentifier != Bundle.main.bundleIdentifier ? frontmostApplicationProvider() : previousFrontmostApp)
-        let delivery = DeliveryContext(
-            policy: context.selection.appPolicy,
-            clickIntent: clickIntent,
-            delivery: action.delivery,
-            application: targetApp,
-            preference: preference(for: clickIntent),
-            actionTitle: action.title,
-            actionIcon: action.displayIcon(using: ActionCustomizationManager.shared),
-            selection: context.selection
-        )
+        let delivery = deliverySnapshot(for: action, clickIntent: clickIntent)
         inFlightDeliveryContext = delivery
         usageStore.record(action.id)
         let match = action.matchInfo(for: context)
@@ -1633,12 +2480,40 @@ public class PopupWindowController {
                     if let selection = delivery.selection {
                         let canPaste = await pasteProbe.canPaste(in: delivery.application, policy: delivery.policy) ?? false
                         show(for: selection, pasteAvailable: canPaste)
-                        showResultCard(text: text, isError: false, title: delivery.actionTitle ?? "Action", icon: delivery.actionIcon, session: aiSessionID)
+                        showResultCard(text: text, isError: false, title: delivery.actionTitle ?? "Action", icon: delivery.actionIcon, session: aiSessionID, canFollowUp: false)
+                    }
+                    return
+                }
+                if case .file(let filePayload) = resolved.result {
+                    toastController.hide()
+                    if let selection = delivery.selection {
+                        let canPaste = await pasteProbe.canPaste(in: delivery.application, policy: delivery.policy) ?? false
+                        show(for: selection, pasteAvailable: canPaste)
+                        showResultCard(
+                            text: filePayload.displayName,
+                            isError: false,
+                            title: delivery.actionTitle ?? filePayload.displayName,
+                            icon: delivery.actionIcon,
+                            session: aiSessionID,
+                            canFollowUp: false,
+                            file: filePayload
+                        )
                     }
                     return
                 }
                 try await resultHandler.handle(resolved.result, in: panel?.contentView)
-                if let toast = resolved.toast, !suppressDeliveryToast {
+                let toastToShow: StatusFeedback? = {
+                    if let toast = resolved.toast {
+                        if case .saveFile = resolved.result {
+                            let saveDir = settingsStore.get(.fileSaveLocation)
+                            let folderName = !saveDir.isEmpty ? URL(fileURLWithPath: (saveDir as NSString).expandingTildeInPath).lastPathComponent : "Downloads"
+                            return StatusFeedback(message: String(localized: "Saved to \(folderName)"), style: .success, symbolName: "arrow.down.circle")
+                        }
+                        return toast
+                    }
+                    return nil
+                }()
+                if let toast = toastToShow, !suppressDeliveryToast {
                     toastController.swapTo(toast)
                 } else if !suppressDeliveryToast {
                     toastController.hide()
@@ -1649,16 +2524,29 @@ public class PopupWindowController {
         }
     }
 
+    /// Surfaces a StatusFeedback as the floating toast (the single status renderer). When `point`
+    /// is provided, the toast centers over that point (e.g. mouse cursor); otherwise it attaches
+    /// to the popup panel's live (or last) frame.
+    public func showToast(_ feedback: StatusFeedback, at point: CGPoint? = nil) {
+        let anchor: NSRect?
+        if let point {
+            anchor = NSRect(origin: point, size: CGSize(width: 1, height: 1))
+        } else {
+            anchor = panel?.frame ?? lastPopupFrame
+        }
+        toastController.show(feedback, anchorFrame: anchor)
+    }
+
     /// Surfaces a StatusFeedback as the floating toast (the single status renderer). The toast
     /// is independent of the popup, so it shows whether the popup stays up or has already hidden;
     /// it always attaches to the popup's live (or last) frame — never the pointer.
     private func presentToast(_ feedback: StatusFeedback) {
-        toastController.show(feedback, anchorFrame: panel?.frame ?? lastPopupFrame)
+        showToast(feedback)
     }
 
     /// Decision 8 config-open path: the popup has already hidden (`.openConfiguration` dismisses it);
     /// post the configuration notification so the Preferences host presents the action's
-    /// EditActionSheet (StatusBarController opens Preferences and drives the sheet).
+    /// ActionEditorPage (StatusBarController opens Preferences and drives the sheet).
     private func presentConfiguration(for request: ConfigurationRequest) {
         NotificationCenter.default.post(
             name: .openClipOpenActionConfiguration,

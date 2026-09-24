@@ -21,7 +21,7 @@ public struct IconEntry: Identifiable, Sendable, Hashable {
 
 // MARK: - UnifiedIconProvider
 
-/// Searches icons on demand using the Iconify API (same approach as PopClip).
+/// Searches icons on demand using the Iconify API.
 /// - SF Symbols are loaded locally from the system plist (instant).
 /// - All other icons are searched via `https://api.iconify.design/search`
 ///   with `palette=false` to ensure only monochrome/adaptive icons are returned.
@@ -61,7 +61,7 @@ public final class UnifiedIconProvider: ObservableObject, Sendable {
         self.sfLoaded = true
     }
 
-    // MARK: - On-demand Iconify search (like PopClip)
+    // MARK: - On-demand Iconify search
 
     /// Call this whenever the search query changes.
     /// - Empty query shows first 160 SF Symbols only (no network call).

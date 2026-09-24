@@ -50,15 +50,15 @@ Welcome to the **OpenClip** technical documentation hub. OpenClip is a lightweig
 - [Text Selection Subsystem](architecture/text-selection.md) — Selection detection, the gate/resolver/strategy retrieval model, and non-destructive selection handling.
 - [Popup Panel & Positioning Math](architecture/popup-window.md) — `PopupPanel`, static layout math in `PopupPositioner`, and window lifecycle management.
 - [Logging](logging.md) — the single `Log` surface, category table, and per-subsystem filtering workflow.
-
-### Architecture Decision Records
-- [ADR 0001 — Isolate the Claude Code CLI invocation](adr/0001-isolate-the-claude-code-cli-invocation.md) — Why the Claude Code (local CLI) provider exists, its isolation flag set flag by flag, what those flags do *not* buy, the dated model pin, the divergences from upstream, and the measurements behind each.
+- [DMG Installer](dmg.md) — the styled disk image: HTML-rendered background, Retina TIFF, and the Finder layout contract.
 
 ### Developer Guide
 - [AGENTS.md — Authoring & Packaging Extensions](../Extensions/AGENTS.md) — **Start here.** Self-contained guide: manifest schema, all action kinds, options, requirements, groups, and the result surface.
 - [Extending OpenClip Overview](developer-guide/overview.md) — Extension architecture and custom action integration.
 - [Extension Package Format](developer-guide/package-format.md) — `.openclipext` bundle structure, `manifest.json` schema, and options definitions.
 - [Standalone Snippet Parsing](developer-guide/snippets.md) — Pure header parsing via `OpenClipSnippetParser`.
+- [Integration & Automation API](developer-guide/integration-api.md) — The inbound `openclip://` contract: routes, curated settings, callbacks, and what is not yet exposed.
+- [Code Signing, Hardened Runtime & Notarization](developer-guide/signing-and-notarization.md) — Ad-hoc vs Developer ID builds, the entitlements OpenClip grants and refuses, the sign → notarize → staple pipeline, and the checks that gate a release.
 
 ### Action Execution Runtimes
 - [AppleScript Runtime](runtimes/applescript.md) — `AppleScriptAction` execution, variable injection, and output handling.

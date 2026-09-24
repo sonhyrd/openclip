@@ -6,18 +6,33 @@
 import SwiftUI
 import Core
 
-public enum StoreFilter: String, CaseIterable, Identifiable, Sendable {
-    case all
-    case popular
-    case new
+/// How the store list is ordered. It replaced an All/Popular/New *filter*, which hid extensions
+/// rather than reordering them — "Popular" dropped everything with no downloads yet, which is
+/// exactly where a new extension starts.
+public enum StoreSort: String, CaseIterable, Identifiable, Sendable {
+    /// The catalogue's own order, with the curated showcase on top. The default.
+    case featured
+    case name
+    case downloads
+    case recentlyAdded
 
     public var id: String { rawValue }
 
     public var title: String {
         switch self {
-        case .all: return String(localized: "All")
-        case .popular: return String(localized: "Popular")
-        case .new: return String(localized: "New")
+        case .featured: return String(localized: "Featured")
+        case .name: return String(localized: "Name")
+        case .downloads: return String(localized: "Downloads")
+        case .recentlyAdded: return String(localized: "Recently Added")
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .featured: return "rosette"
+        case .name: return "textformat"
+        case .downloads: return "arrow.down.circle"
+        case .recentlyAdded: return "clock"
         }
     }
 }
@@ -28,19 +43,18 @@ public final class ExtensionsStoreViewModel: ObservableObject {
     @Published public var extensions: [ExtensionItem] = []
     @Published public var featuredItems: [ExtensionItem] = []
     @Published public var newItems: [ExtensionItem] = []
-    @Published public var selectedFilter: StoreFilter = .all
+    @Published public var selectedSort: StoreSort = .featured
     @Published public var isLoading: Bool = false
     @Published public var currentPage: Int = 1
     @Published public var totalPages: Int = 1
+    @Published public var networkError: String? = nil
 
     /// Curated featured extensions in priority order (shared with onboarding).
     public static let curatedFeaturedIDs: [String] = [
-        "com.openclip.quick-translate",  // Quick Translate
-        "com.openclip.wordcount",       // Word & Character Count
-        "com.openclip.speakselection",  // Speak Selection
-        "com.openclip.obsidiancapture", // Obsidian Capture
-        "com.openclip.applereminders",  // Apple Reminders
-        "com.openclip.githubsearch",    // GitHub Search
+        "com.openclip.quick-translate",   // Quick Translate
+        "com.openclip.runcommand",        // Run in Terminal
+        "com.openclip.copy-as-markdown",  // Copy as Markdown
+        "com.openclip.shortenlink",       // Shorten Link
     ]
 
     /// High-quality built-in fallbacks for curated items ensuring the Featured showcase
@@ -52,43 +66,43 @@ public final class ExtensionsStoreViewModel: ObservableObject {
             description: "Translate selected text instantly — result previewed in the popup or pasted in place.",
             author: "OpenClip Team",
             icon: "character.bubble",
-            downloadCount: 121,
+            downloadCount: 307,
             downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.quick-translate@1.0.0/QuickTranslate.openclipext.zip",
             version: "1.0.0",
             iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.quick-translate.svg"
         ),
         ExtensionItem(
-            id: "com.openclip.wordcount",
-            name: "Word & Character Count",
-            description: "Count the words and characters in the selected text.",
-            author: "OpenClip Team",
-            icon: "text.alignleft",
-            downloadCount: 84,
-            downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.wordcount@1.0.2/WordCount.openclipext.zip",
-            version: "1.0.2",
-            iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.wordcount.svg"
-        ),
-        ExtensionItem(
-            id: "com.openclip.speakselection",
-            name: "Speak Selection",
-            description: "Text-to-speech using system voice.",
+            id: "com.openclip.runcommand",
+            name: "Run in Terminal",
+            description: "Run selected text as a command in Terminal, iTerm, Warp, or Ghostty.",
             author: "OpenClip Team",
             icon: "icon.svg",
-            downloadCount: 74,
-            downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.speakselection@1.0.1/SpeakSelection.openclipext.zip",
-            version: "1.0.1",
-            iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.speakselection.svg"
-        ),
-        ExtensionItem(
-            id: "com.openclip.obsidiancapture",
-            name: "Obsidian Capture",
-            description: "Capture selected text to an Obsidian vault note.",
-            author: "OpenClip Team",
-            icon: "icon.svg",
-            downloadCount: 6,
-            downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.obsidiancapture@1.0.0/ObsidianCapture.openclipext.zip",
+            downloadCount: 20,
+            downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.runcommand@1.0.0/RunCommand.openclipext.zip",
             version: "1.0.0",
-            iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.obsidiancapture.svg"
+            iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.runcommand.svg"
+        ),
+        ExtensionItem(
+            id: "com.openclip.copy-as-markdown",
+            name: "Copy as Markdown",
+            description: "Convert rich text, web selections, and tables into clean Markdown.",
+            author: "OpenClip Team",
+            icon: "icon.svg",
+            downloadCount: 35,
+            downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.copy-as-markdown@1.0.0/CopyAsMarkdown.openclipext.zip",
+            version: "1.0.0",
+            iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.copy-as-markdown.svg"
+        ),
+        ExtensionItem(
+            id: "com.openclip.shortenlink",
+            name: "Shorten Link",
+            description: "Shorten the selected URL using TinyURL, is.gd, or v.gd.",
+            author: "OpenClip Team",
+            icon: "icon.svg",
+            downloadCount: 25,
+            downloadURL: "https://github.com/ganeshmshetty/openclip-extensions/releases/download/com.openclip.shortenlink@1.0.0/ShortenLink.openclipext.zip",
+            version: "1.0.0",
+            iconURL: "https://cdn.jsdelivr.net/gh/ganeshmshetty/openclip-extensions@main/published/icons/com.openclip.shortenlink.svg"
         )
     ]
 
@@ -104,6 +118,13 @@ public final class ExtensionsStoreViewModel: ObservableObject {
         "com.openclip.wikipedia",
         "com.openclip.applemusic",
     ]
+
+    public func isFeatured(_ item: ExtensionItem) -> Bool {
+        if !featuredItems.isEmpty {
+            return featuredItems.contains(where: { $0.id.caseInsensitiveCompare(item.id) == .orderedSame })
+        }
+        return Self.curatedFeaturedIDs.contains(where: { $0.caseInsensitiveCompare(item.id) == .orderedSame })
+    }
 
     public static func isFeatured(_ item: ExtensionItem) -> Bool {
         curatedFeaturedIDs.contains(where: { $0.caseInsensitiveCompare(item.id) == .orderedSame })
@@ -160,11 +181,18 @@ public final class ExtensionsStoreViewModel: ObservableObject {
         return extensions.filter { !showcased.contains($0.id.lowercased()) }
     }
 
+    /// The storefront below the featured showcase: everything else, in catalog
+    /// order. New and updated items used to get a showcase of their own, which
+    /// meant three stacked lists competing for the first look; they are part of
+    /// the catalog now.
+    public var catalogSectionItems: [ExtensionItem] {
+        let featured = Set(featuredSectionItems.map { $0.id.lowercased() })
+        return extensions.filter { !featured.contains($0.id.lowercased()) }
+    }
+
     /// ID of the last item rendered across the sectioned storefront, used to trigger pagination.
     public var lastRenderedSectionedItemID: String? {
-        remainingAllSectionItems.last?.id
-            ?? newSectionItems.last?.id
-            ?? featuredSectionItems.last?.id
+        catalogSectionItems.last?.id ?? featuredSectionItems.last?.id
     }
 
     /// True when the given item is the final rendered item in the sectioned storefront.
@@ -177,34 +205,67 @@ public final class ExtensionsStoreViewModel: ObservableObject {
         itemID == displayedExtensions.last?.id
     }
 
-    /// Full list when the "Popular" filter tab is selected.
-    public var popularFilterItems: [ExtensionItem] {
-        let byID = Dictionary(extensions.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
-        let curated = !featuredItems.isEmpty ? featuredItems : Self.curatedFeaturedIDs.compactMap { byID[$0.lowercased()] }
-        var chosen = Set(curated.map { $0.id.lowercased() })
-        let popular = extensions
-            .filter { !chosen.contains($0.id.lowercased()) && $0.downloadCount > 0 }
-            .sorted { $0.downloadCount > $1.downloadCount }
-        for item in popular { chosen.insert(item.id.lowercased()) }
-        return curated + popular
-    }
+    /// Orders `items` without dropping any of them. Pure, so the ordering is pinned by tests.
+    ///
+    /// `newest` is a rank rather than a date: the catalogue carries no published-at field, so the
+    /// API's own "new" list comes first (in its order), then the curated recent ids, then anything
+    /// whose version says it has moved past its first release. Ties keep catalogue order, which is
+    /// why the rank is paired with the original index instead of relying on a stable sort.
+    public static func sorted(
+        _ items: [ExtensionItem],
+        by sort: StoreSort,
+        apiNewItems: [ExtensionItem] = []
+    ) -> [ExtensionItem] {
+        switch sort {
+        case .featured:
+            return items
 
-    /// Full list when the "New" filter tab is selected.
-    public var newFilterItems: [ExtensionItem] {
-        if !newItems.isEmpty {
-            var chosen = Set(newItems.map { $0.id.lowercased() })
-            let other = extensions.filter { ext in
-                !chosen.contains(ext.id.lowercased()) && Self.isNew(ext)
+        case .name:
+            return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+        case .downloads:
+            return items.sorted {
+                if $0.downloadCount != $1.downloadCount {
+                    return $0.downloadCount > $1.downloadCount
+                }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
-            return newItems + other
+
+        case .recentlyAdded:
+            var apiRank: [String: Int] = [:]
+            for (index, item) in apiNewItems.enumerated() {
+                apiRank[item.id.lowercased()] = index
+            }
+            let curated = Set(recentNewIDs.map { $0.lowercased() })
+
+            /// Newest first for anything the catalogue dated. The ranks below are the fallback for
+            /// a snapshot from before `publishedAt` existed: the API's own "new" list in its
+            /// order, then the curated ids, then anything past its first release.
+            func rank(_ item: ExtensionItem) -> (Int, Int) {
+                let id = item.id.lowercased()
+                if let position = apiRank[id] { return (0, position) }
+                if curated.contains(id) { return (1, 0) }
+                return (isNew(item) ? 2 : 3, 0)
+            }
+
+            let dated = items.enumerated().filter { $0.element.publishedDate != nil }
+            let undated = items.enumerated().filter { $0.element.publishedDate == nil }
+
+            let newestFirst = dated.sorted { left, right in
+                let leftDate = left.element.publishedDate ?? .distantPast
+                let rightDate = right.element.publishedDate ?? .distantPast
+                if leftDate != rightDate { return leftDate > rightDate }
+                return left.offset < right.offset
+            }
+            let ranked = undated.sorted { left, right in
+                let leftRank = rank(left.element)
+                let rightRank = rank(right.element)
+                if leftRank != rightRank { return leftRank < rightRank }
+                return left.offset < right.offset
+            }
+
+            return (newestFirst + ranked).map(\.element)
         }
-        let byID = Dictionary(extensions.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
-        let curatedNew = Self.recentNewIDs.compactMap { byID[$0.lowercased()] }
-        var chosen = Set(curatedNew.map { $0.id.lowercased() })
-        let updated = extensions.filter { ext in
-            !chosen.contains(ext.id.lowercased()) && Self.isNew(ext)
-        }
-        return curatedNew + updated
     }
 
     /// Monotonic result-set generation. Every reset bumps it; any response that resolves
@@ -229,27 +290,15 @@ public final class ExtensionsStoreViewModel: ObservableObject {
     deinit { searchTask?.cancel() }
 
     public var displayedExtensions: [ExtensionItem] {
-        let query = searchQuery.trimmingCharacters(in: .whitespaces)
-        if !query.isEmpty {
-            return extensions
-        }
-        switch selectedFilter {
-        case .all:
-            return extensions
-        case .popular:
-            return popularFilterItems
-        case .new:
-            return newFilterItems
-        }
+        Self.sorted(extensions, by: selectedSort, apiNewItems: newItems)
     }
 
     /// Debounced, cancellable search entry point for per-keystroke changes. Coalesces rapid
     /// typing into one request and cancels any in-flight one; the view calls this from
     /// `onChange(of: searchQuery)` instead of spawning its own unstructured task.
     public func queryDidChange() {
-        if !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
-            selectedFilter = .all
-        }
+        // The chosen order carries over into the results: sorting is not a filter, so a search
+        // does not need to undo it.
         searchTask?.cancel()
         searchTask = Task { [weak self] in
             guard let self else { return }
@@ -259,16 +308,17 @@ public final class ExtensionsStoreViewModel: ObservableObject {
         }
     }
 
-    public func fetchNextPage(isReset: Bool = false) async {
+    public func fetchNextPage(isReset: Bool = false, ignoreCache: Bool = false) async {
         let gen = generation
         guard !isLoading || isReset, currentPage <= totalPages else { return }
         isLoading = true
 
         do {
-            let response = try await api.fetchExtensions(query: searchQuery, page: currentPage, limit: pageLimit)
+            let response = try await api.fetchExtensions(query: searchQuery, page: currentPage, limit: pageLimit, ignoreCache: ignoreCache)
             // Superseded mid-flight (newer search/reset owns the result set): touch nothing,
             // especially not `isLoading`, which now belongs to the winning generation.
             guard gen == generation else { return }
+            networkError = nil
             if let featured = response.featured, !featured.isEmpty {
                 featuredItems = featured
             }
@@ -284,18 +334,20 @@ public final class ExtensionsStoreViewModel: ObservableObject {
             currentPage += 1
             isLoading = false
         } catch is CancellationError {
-            // Superseded or torn down; the winner manages its own state.
+            guard gen == generation else { return }
+            isLoading = false
         } catch {
             guard gen == generation else { return }
             Log.extensions.warning("Failed to fetch extension store page \(self.currentPage) for query '\(self.searchQuery)'")
             if isReset && extensions.isEmpty {
+                networkError = error.localizedDescription
                 extensions = []
             }
             isLoading = false
         }
     }
 
-    public func resetAndFetch(limit: Int = Constants.storePageLimit, keepPrevious: Bool = false) async {
+    public func resetAndFetch(limit: Int = Constants.storePageLimit, keepPrevious: Bool = false, ignoreCache: Bool = false) async {
         // Bump first: any in-flight request from the previous generation is dead on arrival
         // and can neither append rows nor hold the loading flag against this fetch.
         generation += 1
@@ -304,9 +356,16 @@ public final class ExtensionsStoreViewModel: ObservableObject {
         totalPages = 1
         if !keepPrevious {
             extensions = []
+            networkError = nil
         }
         isLoading = true
-        await fetchNextPage(isReset: true)
+        await fetchNextPage(isReset: true, ignoreCache: ignoreCache)
+    }
+
+    /// Explicit manual refresh that clears cached store responses and reloads the fresh catalog from the network.
+    public func refreshCatalog() async {
+        await api.invalidateCache()
+        await resetAndFetch(limit: max(pageLimit, 100), keepPrevious: false, ignoreCache: true)
     }
 }
 
@@ -322,13 +381,11 @@ public struct ExtensionStoreView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            filterPillsRow
-            storeContent
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
-        .padding(.bottom, 0)
+        // The search field and the sort button live in the window toolbar, so the pane is just
+        // the list. No padding around `storeContent`: the list has to reach the pane's top edge
+        // for the system to fade it out under the toolbar the way the Form-based panes are. The
+        // 12pt gutter lives on the scrolling content inside instead.
+        storeContent
         .task {
             if viewModel.extensions.isEmpty {
                 await viewModel.resetAndFetch(limit: 100)
@@ -336,64 +393,25 @@ public struct ExtensionStoreView: View {
         }
     }
 
-    private var filterPillsRow: some View {
-        HStack(spacing: 8) {
-            ForEach(StoreFilter.allCases) { filter in
-                let isSelected = viewModel.selectedFilter == filter && !isSearching
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        if isSearching {
-                            viewModel.searchQuery = ""
-                        }
-                        viewModel.selectedFilter = filter
-                    }
-                } label: {
-                    HStack(spacing: 4.5) {
-                        if filter == .popular {
-                            Image(systemName: "flame.fill")
-                                .font(.system(size: 9.5, weight: .semibold))
-                        } else if filter == .new {
-                            Image(systemName: "clock.arrow.circlepath")
-                                .font(.system(size: 9.5, weight: .semibold))
-                        }
-                        Text(filter.title)
-                            .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
-                    }
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 4.5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.06))
-                    )
-                    .foregroundColor(isSelected ? .white : .secondary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 8)
-        .opacity(isSearching ? 0.4 : 1.0)
-    }
-
     private var storeContent: some View {
         VStack(spacing: 0) {
             if viewModel.extensions.isEmpty && viewModel.isLoading {
                 skeletonList
+            } else if viewModel.extensions.isEmpty && viewModel.networkError != nil {
+                offlineStateView
             } else if viewModel.displayedExtensions.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "sparkles")
                         .font(.system(size: 36))
                         .foregroundColor(.secondary)
-                    Text("No extensions found")
+                    Text(isSearching ? String(localized: "No extensions found") : String(localized: "No clips found"))
                         .font(.headline)
                         .foregroundColor(.secondary)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !isSearching && viewModel.selectedFilter == .all {
+            } else if !isSearching && viewModel.selectedSort == .featured {
                 sectionedAllStoreContent
             } else {
                 flatStoreContent
@@ -401,99 +419,156 @@ public struct ExtensionStoreView: View {
         }
     }
 
-    private func sectionHeader(title: String, icon: String, count: Int? = nil) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.accentColor)
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
+    private var offlineStateView: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 40))
+                .foregroundColor(.secondary.opacity(0.8))
+            Text(String(localized: "Unable to Connect to Store"))
+                .font(.headline)
+                .foregroundColor(.primary)
+            Text(String(localized: "Check your internet connection or network settings. If you are behind a corporate proxy or firewall, access to the extension store may be blocked."))
+                .font(.subheadline)
                 .foregroundColor(.secondary)
-                .textCase(.uppercase)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+            Button {
+                Task {
+                    await viewModel.refreshCatalog()
+                }
+            } label: {
+                Label(String(localized: "Try Again"), systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .padding(.top, 4)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
+    }
+
+    private var storeHeroHeader: some View {
+        VStack(spacing: 10) {
+            Image("StoreIcon")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .shadow(color: Color.black.opacity(0.14), radius: 5, x: 0, y: 2.5)
+
+            VStack(spacing: 3) {
+                Text(String(localized: "The Clip Store"))
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(SettingsDesignTokens.primaryText)
+                    .multilineTextAlignment(.center)
+
+                Text(String(localized: "Discover and install extensions for OpenClip"))
+                    .font(.subheadline)
+                    .foregroundStyle(SettingsDesignTokens.secondaryText)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 10)
+    }
+
+    private func sectionHeader(_ title: String, count: Int? = nil) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.headline)
             if let count {
-                Text("(\(count))")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary.opacity(0.7))
+                Text("\(count)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
         }
         .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 4)
+        .padding(.top, 16)
+        .padding(.bottom, 6)
     }
 
     private var sectionedAllStoreContent: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                // Section 1: Featured
+                storeHeroHeader
+
                 if !viewModel.featuredSectionItems.isEmpty {
-                    sectionHeader(title: String(localized: "Featured"), icon: "rosette")
+                    sectionHeader(String(localized: "Featured"))
                     ForEach(Array(viewModel.featuredSectionItems.enumerated()), id: \.element.id) { index, ext in
                         if index > 0 {
-                            Divider()
-                                .padding(.leading, 60)
-                                .padding(.trailing, 14)
+                            rowDivider
                         }
-                        ExtensionCardView(item: ext)
-                            .onAppear {
-                                if viewModel.shouldTriggerSectionedPagination(for: ext.id) {
-                                    Task { await viewModel.fetchNextPage() }
-                                }
-                            }
+                        storeRow(ext)
                     }
                 }
 
-                // Section 2: New & Updated
-                if !viewModel.newSectionItems.isEmpty {
-                    sectionHeader(title: String(localized: "New & Updated"), icon: "clock.arrow.circlepath")
-                    ForEach(Array(viewModel.newSectionItems.enumerated()), id: \.element.id) { index, ext in
+                if !viewModel.catalogSectionItems.isEmpty {
+                    sectionHeader(
+                        String(localized: "All Extensions"),
+                        count: viewModel.catalogSectionItems.count
+                    )
+                    ForEach(Array(viewModel.catalogSectionItems.enumerated()), id: \.element.id) { index, ext in
                         if index > 0 {
-                            Divider()
-                                .padding(.leading, 60)
-                                .padding(.trailing, 14)
+                            rowDivider
                         }
-                        ExtensionCardView(item: ext)
-                            .onAppear {
-                                if viewModel.shouldTriggerSectionedPagination(for: ext.id) {
-                                    Task { await viewModel.fetchNextPage() }
-                                }
-                            }
-                    }
-                }
-
-                // Section 3: All Extensions
-                if !viewModel.remainingAllSectionItems.isEmpty {
-                    sectionHeader(title: String(localized: "All Extensions"), icon: "square.grid.2x2", count: viewModel.remainingAllSectionItems.count)
-                    ForEach(Array(viewModel.remainingAllSectionItems.enumerated()), id: \.element.id) { index, ext in
-                        if index > 0 {
-                            Divider()
-                                .padding(.leading, 60)
-                                .padding(.trailing, 14)
-                        }
-                        ExtensionCardView(item: ext)
-                            .onAppear {
-                                if viewModel.shouldTriggerSectionedPagination(for: ext.id) {
-                                    Task { await viewModel.fetchNextPage() }
-                                }
-                            }
+                        storeRow(ext)
                     }
                 }
             }
+            .padding(.horizontal, 12)
         }
         .opacity(viewModel.isLoading && !viewModel.extensions.isEmpty ? 0.65 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: viewModel.isLoading)
     }
 
+    private var rowDivider: some View {
+        Divider()
+            .padding(.leading, 60)
+            .padding(.trailing, 14)
+    }
+
+    private func storeRow(_ ext: ExtensionItem) -> some View {
+        ExtensionCardView(item: ext, isFeatured: viewModel.isFeatured(ext))
+            .onAppear {
+                if viewModel.shouldTriggerSectionedPagination(for: ext.id) {
+                    Task { await viewModel.fetchNextPage() }
+                }
+            }
+    }
+
+    private var flatSectionTitle: String {
+        if isSearching {
+            return String(localized: "Search Results")
+        }
+        switch viewModel.selectedSort {
+        case .featured, .name:
+            return String(localized: "All Extensions")
+        case .downloads:
+            return String(localized: "Most Downloaded")
+        case .recentlyAdded:
+            return String(localized: "Recently Added")
+        }
+    }
+
     private var flatStoreContent: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
+                if !isSearching {
+                    storeHeroHeader
+                }
+
+                sectionHeader(flatSectionTitle, count: viewModel.displayedExtensions.count)
+
                 ForEach(Array(viewModel.displayedExtensions.enumerated()), id: \.element.id) { index, ext in
                     if index > 0 {
-                        Divider()
-                            .padding(.leading, 60)
-                            .padding(.trailing, 14)
+                        rowDivider
                     }
-                    ExtensionCardView(item: ext)
+                    ExtensionCardView(item: ext, isFeatured: viewModel.isFeatured(ext))
                         .onAppear {
                             if viewModel.shouldTriggerFlatPagination(for: ext.id) {
                                 Task { await viewModel.fetchNextPage() }
@@ -501,6 +576,7 @@ public struct ExtensionStoreView: View {
                         }
                 }
             }
+            .padding(.horizontal, 12)
         }
         .opacity(viewModel.isLoading && !viewModel.extensions.isEmpty ? 0.65 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: viewModel.isLoading)
@@ -518,6 +594,7 @@ public struct ExtensionStoreView: View {
                     ExtensionCardSkeletonRow()
                 }
             }
+            .padding(.horizontal, 12)
         }
     }
 }
@@ -549,9 +626,9 @@ private struct ExtensionCardSkeletonRow: View {
 
             Spacer()
 
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 6.5, style: .continuous)
                 .fill(Color.primary.opacity(0.07))
-                .frame(width: 64, height: 24)
+                .frame(width: 26, height: 26)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

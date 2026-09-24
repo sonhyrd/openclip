@@ -22,6 +22,7 @@ public final class ExtensionManager: Sendable {
     public private(set) var loadedActions: [any Action] = []
     public var actionFactory: (any ActionFactory)?
     public var optionWriter: (any ActionOptionWriting)?
+    public var optionReader: (any ActionOptionReading)?
     
     /// Persistence for the trust gate. When nil the manager skips gating entirely (pre-existing
     /// behavior); production sets it in AppDelegate, tests set a MemorySettingsStore.
@@ -46,6 +47,7 @@ public final class ExtensionManager: Sendable {
         onUnregister = nil
         actionFactory = nil
         optionWriter = nil
+        optionReader = nil
         settingsStore = nil
         onTrustChange = nil
     }
@@ -249,7 +251,7 @@ public final class ExtensionManager: Sendable {
         await loadExtensions(from: directory)
     }
 
-    /// Re-records the trust fingerprint after an authorized in-app edit (EditActionSheet save) so
+    /// Re-records the trust fingerprint after an authorized in-app edit (ActionEditorPage save) so
     /// tamper detection does not falsely flag the changed files. Only an already-`trusted` package
     /// is re-trusted: a `revoked` (explicit user "no") or never-enabled (`seen`) package keeps its
     /// trust state — a config-sheet save must never double as a consent flow. The next explicit
@@ -365,6 +367,203 @@ public final class ExtensionManager: Sendable {
         }
         await loadExtensions(from: targetDir)
     }
+
+    /// Duplicates an installed extension package (.openclipext folder or standalone script) on disk.
+    /// Creates a cloned directory or file with a unique copy identifier, copies configured options,
+    /// marks the package trusted, reloads extensions, and returns the new action ID.
+    @discardableResult
+    public func duplicateExtension(actionID: String, targetDir: URL = Constants.extensionsDirectory) async throws -> String {
+        let fm = FileManager.default
+        let items = try fm.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: [.isDirectoryKey])
+        let suffix = UUID().uuidString.prefix(6).lowercased()
+
+        for itemURL in items {
+            // Skip hidden/staging dirs
+            guard !itemURL.lastPathComponent.hasPrefix(".") else { continue }
+
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: itemURL.path, isDirectory: &isDir) else { continue }
+
+            if isDir.boolValue {
+                for fname in ExtensionManifestStore.candidateFileNames {
+                    let manifestURL = itemURL.appendingPathComponent(fname)
+                    guard let manifest = ExtensionManifestStore.readManifest(at: manifestURL) else { continue }
+
+                    let actionIDPrefix = manifest.identifier + "."
+                    let matchesPackage = actionID == manifest.identifier || actionID.hasPrefix(actionIDPrefix)
+
+                    var targetActionIndex: Int?
+                    for (index, actionMeta) in manifest.actions.enumerated() {
+                        let id = ExtensionManager.uniformActionID(metadata: actionMeta, manifest: manifest, index: index)
+                        if id == actionID {
+                            targetActionIndex = index
+                            break
+                        }
+                    }
+
+                    if matchesPackage || targetActionIndex != nil {
+                        let newPackageID = "\(manifest.identifier).copy.\(suffix)"
+                        let newDirName = "\(itemURL.lastPathComponent)-copy-\(suffix)"
+                        let destinationDirURL = targetDir.appendingPathComponent(newDirName)
+
+                        try fm.copyItem(at: itemURL, to: destinationDirURL)
+
+                        let destManifestURL = destinationDirURL.appendingPathComponent(fname)
+                        let newPackageName = "\(manifest.name) Copy"
+
+                        var newActions = manifest.actions
+                        for i in 0..<newActions.count {
+                            let oldMeta = newActions[i]
+                            let updatedID: String?
+                            if let oldID = oldMeta.id {
+                                if oldID.contains(".") {
+                                    let tail = oldID.split(separator: ".").last.map(String.init) ?? oldID
+                                    updatedID = "\(newPackageID).\(tail)"
+                                } else {
+                                    updatedID = "\(oldID).copy.\(suffix)"
+                                }
+                            } else {
+                                updatedID = nil
+                            }
+                            let title = oldMeta.title.map { "\($0) Copy" } ?? newPackageName
+                            newActions[i] = ExtensionActionMetadata(
+                                id: updatedID,
+                                title: title,
+                                icon: oldMeta.icon,
+                                script: oldMeta.script,
+                                url: oldMeta.url,
+                                regex: oldMeta.regex,
+                                type: oldMeta.type,
+                                scriptCode: oldMeta.scriptCode,
+                                requirements: oldMeta.requirements,
+                                isAsync: oldMeta.isAsync,
+                                options: oldMeta.options,
+                                subActions: oldMeta.subActions,
+                                keyPress: oldMeta.keyPress,
+                                serviceName: oldMeta.serviceName,
+                                shortcutName: oldMeta.shortcutName,
+                                menuRelevance: oldMeta.menuRelevance,
+                                loading: oldMeta.loading,
+                                loadingMessage: oldMeta.loadingMessage,
+                                secondary: oldMeta.secondary,
+                                toast: oldMeta.toast,
+                                secondaryToast: oldMeta.secondaryToast,
+                                keywords: oldMeta.keywords,
+                                inline: oldMeta.inline,
+                                localizedTitle: nil,
+                                localizedLoadingMessage: oldMeta.localizedLoadingMessage,
+                                output: oldMeta.output,
+                                result: oldMeta.result
+                            )
+                        }
+
+                        let updatedManifest = ExtensionMetadata(
+                            identifier: newPackageID,
+                            name: newPackageName,
+                            actions: newActions,
+                            options: manifest.options,
+                            version: manifest.version,
+                            capabilities: manifest.capabilities,
+                            minOpenClipVersion: manifest.minOpenClipVersion,
+                            keywords: manifest.keywords,
+                            localizedName: nil,
+                            description: manifest.description,
+                            localizedDescription: manifest.localizedDescription,
+                            author: manifest.author,
+                            output: manifest.output,
+                            result: manifest.result
+                        )
+
+                        try ExtensionManifestStore.writeManifest(updatedManifest, to: destManifestURL)
+
+                        if let optionReader, let optionWriter {
+                            for (index, actionMeta) in manifest.actions.enumerated() {
+                                let oldActionID = ExtensionManager.uniformActionID(metadata: actionMeta, manifest: manifest, index: index)
+                                let newActionID = ExtensionManager.uniformActionID(metadata: newActions[index], manifest: updatedManifest, index: index)
+                                let allOptions = (manifest.options ?? []) + (actionMeta.options ?? [])
+                                for optMeta in allOptions {
+                                    let opt = ExtensionOption(
+                                        identifier: optMeta.identifier,
+                                        label: optMeta.label,
+                                        type: ExtensionOptionType(rawValue: optMeta.type) ?? .string,
+                                        defaultValue: optMeta.defaultValue,
+                                        options: optMeta.values
+                                    )
+                                    let val = optionReader.stringValue(actionID: oldActionID, option: opt)
+                                    if !val.isEmpty && val != (opt.defaultValue ?? "") {
+                                        optionWriter.setStringValue(val, actionID: newActionID, option: opt)
+                                    }
+                                }
+                            }
+                        }
+
+                        let currentHash = ExtensionPackageHashResolver.packageHash(manifestURL: destManifestURL, manifest: updatedManifest)
+                        if let settings = self.settingsStore {
+                            var sources = settings.get(.extensionSources)
+                            sources[newPackageID] = "developer"
+                            settings.set(.extensionSources, value: sources)
+
+                            var trust = settings.get(.extensionTrust)
+                            trust[newPackageID] = "trusted"
+                            settings.set(.extensionTrust, value: trust)
+
+                            if let currentHash {
+                                var hashes = settings.get(.extensionTrustHashes)
+                                hashes[newPackageID] = currentHash
+                                settings.set(.extensionTrustHashes, value: hashes)
+                            }
+                        }
+
+                        await loadExtensions(from: targetDir)
+
+                        let targetIndex = targetActionIndex ?? 0
+                        let matchingActionID = ExtensionManager.uniformActionID(
+                            metadata: newActions[targetIndex],
+                            manifest: updatedManifest,
+                            index: targetIndex
+                        )
+                        return matchingActionID
+                    }
+                    break
+                }
+            } else {
+                let synthesized = "\(Constants.customIdentifierPrefix)\(itemURL.lastPathComponent)"
+                let declaredID = ExtensionPackageHashResolver.declaredIdentifier(of: itemURL)
+                if actionID == synthesized || actionID == declaredID {
+                    let ext = itemURL.pathExtension
+                    let base = itemURL.deletingPathExtension().lastPathComponent
+                    let newFileName = ext.isEmpty ? "\(base) Copy \(suffix)" : "\(base) Copy \(suffix).\(ext)"
+                    let destinationURL = targetDir.appendingPathComponent(newFileName)
+
+                    try fm.copyItem(at: itemURL, to: destinationURL)
+
+                    let newPackageID = "\(Constants.customIdentifierPrefix)\(newFileName)"
+                    let currentHash = ExtensionPackageHashResolver.fileHash(destinationURL)
+
+                    if let settings = self.settingsStore {
+                        var sources = settings.get(.extensionSources)
+                        sources[newPackageID] = "developer"
+                        settings.set(.extensionSources, value: sources)
+
+                        var trust = settings.get(.extensionTrust)
+                        trust[newPackageID] = "trusted"
+                        settings.set(.extensionTrust, value: trust)
+
+                        if let currentHash {
+                            var hashes = settings.get(.extensionTrustHashes)
+                            hashes[newPackageID] = currentHash
+                            settings.set(.extensionTrustHashes, value: hashes)
+                        }
+                    }
+
+                    await loadExtensions(from: targetDir)
+                    return newPackageID
+                }
+            }
+        }
+
+        throw NSError(domain: "ExtensionManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "No extension found for action \(actionID)."])
+    }
     
     /// Test-only seam exposing the private scan over a directory. The real path funnels through
     /// `loadExtensions` (which applies trust gating); tests use this to obtain raw scanned actions.
@@ -445,6 +644,9 @@ public final class ExtensionManager: Sendable {
             let details = record.issues.map(\.description).joined(separator: "; ")
             Log.extensions.error("Extension manifest rejected at \(manifestURL.path, privacy: .public): \(details, privacy: .public)")
             return []
+        }
+        for warning in record.warnings {
+            Log.extensions.warning("Extension manifest warning at \(manifestURL.path, privacy: .public): \(warning.description, privacy: .public)")
         }
         Log.extensions.notice("Loaded extension manifest \(manifest.identifier, privacy: .public) (v\(record.declaredVersion ?? "-", privacy: .public), schema \(record.schemaVersion, privacy: .public), \(manifest.actions.count) action(s), sha256 \(record.fingerprint, privacy: .public))")
 
@@ -558,18 +760,7 @@ public final class ExtensionManager: Sendable {
     }
     
     nonisolated public static func parseIcon(_ iconStr: String?, directoryURL: URL) -> ActionIcon {
-        guard let iconStr = iconStr, !iconStr.isEmpty else {
-            return .symbol(Constants.defaultIconSymbol)
-        }
-        if iconStr.hasPrefix(Constants.symbolPrefix) && iconStr.hasSuffix(Constants.symbolSuffix) {
-            let symbolName = String(iconStr.dropFirst(Constants.symbolPrefix.count).dropLast(Constants.symbolSuffix.count))
-            return .symbol(symbolName)
-        }
-        let lower = iconStr.lowercased()
-        if Constants.imageExtensions.contains(where: { lower.hasSuffix($0) }) {
-            return .local(directoryURL.appendingPathComponent(iconStr))
-        }
-        return .symbol(iconStr)
+        ActionIcon.resolve(from: iconStr, relativeTo: directoryURL)
     }
 
     /// Uniform action ID rule: an explicit `metadata.id` wins (a bare slug without a dot is prefixed with

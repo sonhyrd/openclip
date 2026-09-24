@@ -229,6 +229,49 @@ final class ScriptActionExecutionTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempScript)
     }
 
+    /// A grandchild that leaves the process group must still die when the watchdog fires.
+    /// `set -m` puts the background sleep in a new group (same hole as setsid/setpgid).
+    func testScriptActionWatchdogKillsDetachedGrandchild() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openclip-watchdog-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tempDir.path)
+        let pidFile = tempDir.appendingPathComponent("grandchild.pid")
+        FileManager.default.createFile(atPath: pidFile.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        do {
+            _ = try await ShellProcessRunner.run(ShellProcessRunner.Invocation(
+                executableURL: URL(fileURLWithPath: "/bin/bash"),
+                arguments: [
+                    "-c",
+                    "set -m; /bin/sleep 60 </dev/null >/dev/null 2>&1 & echo $! > '\(pidFile.path)'; /bin/sleep 60"
+                ],
+                environment: ["PATH": "/usr/bin:/bin"],
+                stdinText: nil,
+                timeout: 0.4
+            ))
+            XCTFail("Expected watchdog timeout")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, Constants.actionErrorDomain)
+            XCTAssertTrue(nsError.localizedDescription.contains("timed out"),
+                          "expected timeout error, got \(nsError.localizedDescription)")
+        }
+
+        guard FileManager.default.fileExists(atPath: pidFile.path),
+              let pidText = try? String(contentsOf: pidFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let grandchildPid = pid_t(pidText),
+              grandchildPid > 0 else {
+            return XCTFail("script must record the detached grandchild pid at \(pidFile.path)")
+        }
+
+        // Wait past terminateProcessGroup's 0.5 s SIGKILL fallback.
+        try await Task.sleep(nanoseconds: 800_000_000)
+        XCTAssertNotEqual(kill(grandchildPid, 0), 0, "detached grandchild must be gone after watchdog")
+    }
+
     /// Cancelling the Swift Task executing a subprocess must immediately signal and kill the
     /// subprocess group and throw CancellationError without waiting for the full timeout.
     func testScriptActionCancellationKillsSubprocessImmediately() async throws {
@@ -295,6 +338,35 @@ final class ScriptActionExecutionTests: XCTestCase {
         XCTAssertEqual(lines.count, 5000)
         XCTAssertEqual(lines.first, "Line 1: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         XCTAssertEqual(lines.last, "Line 5000: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+        try? FileManager.default.removeItem(at: tempScript)
+    }
+
+    /// Output that reaches the pipe after the direct child exits must still be captured.
+    /// `waitUntilExit()` returns as soon as the parent exits, so the pipe drain — not the async
+    /// readability handler — is the only thing that can collect this line. Reading the accumulated
+    /// buffer before that drain loses output, which is what this pins.
+    func testScriptActionOutputWrittenAfterParentExitIsCaptured() async throws {
+        let tempScript = FileManager.default.temporaryDirectory.appendingPathComponent("late_write_\(UUID().uuidString).sh")
+        let scriptContent = """
+        #!/bin/bash
+        (sleep 0.5; echo "GrandchildLate") &
+        echo "ParentDone"
+        exit 0
+        """
+        try scriptContent.write(to: tempScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScript.path)
+
+        let output = try await ShellProcessRunner.run(ShellProcessRunner.Invocation(
+            executableURL: tempScript,
+            arguments: [],
+            environment: [:],
+            stdinText: nil,
+            timeout: 5.0
+        ))
+
+        let lines = output.stdout.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines, ["ParentDone", "GrandchildLate"])
 
         try? FileManager.default.removeItem(at: tempScript)
     }

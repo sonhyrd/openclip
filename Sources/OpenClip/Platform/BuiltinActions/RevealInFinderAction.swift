@@ -8,7 +8,7 @@ import AppKit
 #endif
 import Core
 
-public struct RevealInFinderAction: Action {
+public struct RevealInFinderAction: ConfigurableAction {
     public let id = "builtin.reveal_in_finder"
     public var title: String { String(localized: "Reveal in Finder") }
     public let icon = ActionIcon.symbol("folder")
