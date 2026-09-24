@@ -165,8 +165,8 @@ xcodegen generate
 
 > [!NOTE]
 > Local builds are signed **ad-hoc**, so no Apple Developer account, certificate, or network
-> access is needed to build or run OpenClip from source. They carry the same hardened runtime and
-> entitlements as a release, and Gatekeeper will refuse them on any other Mac. Producing a
+> access is needed to build or run OpenClip from source. They carry the same entitlements as a
+> release (but not the hardened runtime), and Gatekeeper will refuse them on any other Mac. Producing a
 > distributable build is opt-in — see
 > [Code Signing, Hardened Runtime & Notarization](docs/developer-guide/signing-and-notarization.md).
 

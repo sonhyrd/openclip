@@ -89,6 +89,11 @@ echo "==> Building OpenClip v$VERSION (Release)..."
 mkdir -p "$BUILD_DIR"
 rm -rf "${BUILD_DIR:?}"/*
 
+# Ad-hoc code has no Team ID for library validation to match, so hardening an ad-hoc build makes
+# dyld refuse its own Core.framework. sign_artifact.sh makes the same call when it re-signs.
+HARDENED_RUNTIME=YES
+oc_is_adhoc "$IDENTITY" && HARDENED_RUNTIME=NO
+
 # Without an explicit destination xcodebuild resolves the scheme's default one — "My Mac" —
 # and narrows the build to that Mac's architecture, so on an Apple Silicon runner it emits an
 # arm64-only app however ARCHS is configured. 'generic/platform=macOS' plus the explicit ARCHS
@@ -104,6 +109,7 @@ xcodebuild \
     CODE_SIGN_IDENTITY="-" \
     CODE_SIGN_STYLE=Manual \
     DEVELOPMENT_TEAM="" \
+    OPENCLIP_HARDENED_RUNTIME="$HARDENED_RUNTIME" \
     build 2>&1 | tail -5
 
 APP_PATH="$DERIVED_DATA/Build/Products/Release/OpenClip.app"
@@ -155,6 +161,9 @@ ditto -x -k "$BUILD_DIR/$ZIP_NAME" "$VERIFY_DIR"
 # than the bundle the archive was cut from. It proves the notarization ticket survived the
 # round trip through ditto, so Gatekeeper accepts the unpacked app with no network access.
 "$SCRIPT_DIR/verify_signing.sh" "$VERIFY_DIR/OpenClip.app" --require "$REQUIRE"
+# Signature checks read the bundle; this runs it. Sparkle auto-installs whatever the appcast
+# points at, so an app dyld refuses to load would brick every installed build.
+"$SCRIPT_DIR/verify_launch.sh" "$VERIFY_DIR/OpenClip.app"
 rm -rf "$VERIFY_DIR"
 
 echo "==> Generating appcast.xml with Ed25519 signature..."

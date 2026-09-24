@@ -15,8 +15,9 @@
 #   ./scripts/verify_signing.sh <path-to-OpenClip.app|path-to.dmg> [--require <level>]
 #
 # Levels:
-#   any           (default) structural signature, hardened runtime, entitlements match the
-#                 checked-in entitlements file. Passes for ad-hoc builds.
+#   any           (default) structural signature, entitlements match the checked-in
+#                 entitlements file, hardened runtime on for a real identity and off for an
+#                 ad-hoc build (where library validation would stop it launching).
 #   developer-id  the above, plus a Developer ID Application certificate, a secure timestamp,
 #                 and one consistent Team ID across every nested binary.
 #   notarized     the above, plus a stapled notarization ticket and a Gatekeeper assessment that
@@ -112,8 +113,16 @@ if [ "$IS_APP" -eq 1 ]; then
     # -----------------------------------------------------------------------
     # 2. Hardened runtime on the app itself. This is the "Hardening: Not enabled"
     #    row in Apparency, and the reason notarization used to be impossible.
+    #    An ad-hoc build must NOT carry it: library validation then rejects the
+    #    app's own ad-hoc Core.framework ("different Team IDs") and it never launches.
     # -----------------------------------------------------------------------
-    if grep -qE "^CodeDirectory .*flags=.*runtime" <<<"$REPORT"; then
+    HAS_RUNTIME=0
+    grep -qE "^CodeDirectory .*flags=.*runtime" <<<"$REPORT" && HAS_RUNTIME=1
+    if [ "$IS_ADHOC" -eq 1 ] && [ "$HAS_RUNTIME" -eq 1 ]; then
+        fail "ad-hoc build carries the hardened runtime — dyld will refuse its frameworks"
+    elif [ "$IS_ADHOC" -eq 1 ]; then
+        pass "ad-hoc, hardened runtime off (library validation would block launch)"
+    elif [ "$HAS_RUNTIME" -eq 1 ]; then
         pass "hardened runtime enabled"
     else
         fail "hardened runtime flag missing — notarization will be refused"
@@ -181,8 +190,10 @@ PY
         NESTED_REPORT="$(signature_report "$item")"
         REL="${item#"$TARGET"/}"
 
-        if oc_item_has_code "$item" && ! grep -qE "^CodeDirectory .*flags=.*runtime" <<<"$NESTED_REPORT"; then
-            fail "$REL is not signed with the hardened runtime"
+        NESTED_RUNTIME=0
+        grep -qE "^CodeDirectory .*flags=.*runtime" <<<"$NESTED_REPORT" && NESTED_RUNTIME=1
+        if oc_item_has_code "$item" && [ "$NESTED_RUNTIME" -ne "$HAS_RUNTIME" ]; then
+            fail "$REL hardened runtime is $([ "$NESTED_RUNTIME" -eq 1 ] && echo on || echo off), app's is not"
             NESTED_BAD=$((NESTED_BAD + 1))
         fi
 
@@ -206,7 +217,7 @@ PY
     if [ "$NESTED_TOTAL" -eq 0 ]; then
         fail "found no nested code under $LABEL — wrong path?"
     elif [ "$NESTED_BAD" -eq 0 ]; then
-        pass "all $NESTED_TOTAL nested binaries hardened and consistently signed"
+        pass "all $NESTED_TOTAL nested binaries consistently signed"
     fi
 fi
 
@@ -298,7 +309,7 @@ fi
 # The hardened runtime and entitlements are properties of the app; a disk image only carries a
 # signature, so its summary must not claim more than was checked.
 if [ "$IS_ADHOC" -eq 1 ] && [ "$IS_APP" -eq 1 ]; then
-    echo "==> $LABEL is a valid ad-hoc build (hardened, entitlements as declared) — not distributable."
+    echo "==> $LABEL is a valid ad-hoc build (entitlements as declared, no hardened runtime) — not distributable."
 elif [ "$IS_ADHOC" -eq 1 ]; then
     echo "==> $LABEL is ad-hoc signed — not distributable."
 else

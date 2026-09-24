@@ -18,15 +18,24 @@ Signing is **opt-in**, and everything works without it.
 |---|---|---|
 | Apple Developer account | not needed | required |
 | Network access | not needed | required (timestamp + notary) |
-| Hardened runtime | yes | yes |
+| Hardened runtime | no (see below) | yes |
 | Entitlements | yes | yes |
 | Opens on another Mac | no | yes |
 | Used for | local builds, tests, PR/fork CI | releases |
 
 A fresh clone builds, packages, and runs with no certificate at all. The only thing an ad-hoc build
 cannot do is leave the machine that produced it: Gatekeeper has nothing to trust, so it refuses to
-launch. Everything else — the hardened runtime, the entitlements, the inside-out signing order — is
-identical in both modes, so a contributor is exercising the same code path a release does.
+launch. Everything else — the entitlements, the inside-out signing order — is identical in both
+modes, so a contributor is exercising the same code path a release does.
+
+The one deliberate difference is the hardened runtime. Under it, library validation only lets the
+app load frameworks signed by its own Team ID, and ad-hoc code has none, so dyld refuses
+`Core.framework` ("different Team IDs") and the app never starts. `scripts/sign_artifact.sh`
+therefore omits `--options runtime` for an ad-hoc identity, and `ENABLE_HARDENED_RUNTIME` follows
+`OPENCLIP_HARDENED_RUNTIME` (default `NO` in `project.yml`; the packaging scripts pass `YES` with a
+Developer ID). `verify_signing.sh` fails an ad-hoc build that carries the runtime, and
+`scripts/verify_launch.sh` runs the packaged binary (`--version`) so a build dyld rejects never
+reaches Sparkle. Don't paper over this with `com.apple.security.cs.disable-library-validation`.
 
 ```bash
 ./scripts/package_app.sh                                # ad-hoc
@@ -240,9 +249,10 @@ gh attestation verify OpenClip-v1.4.0.dmg --repo ganeshmshetty/openclip \
 choice rather than a limitation: pull requests from forks get no access to secrets, so a signing
 certificate there would only ever work for collaborator branches, and a check that silently does
 nothing for outside contributors is worse than one that behaves identically for everyone. An
-ad-hoc build still exercises the entire signing path — hardened runtime, real entitlements, and the
-inside-out pass over Sparkle's nested helpers — and a dedicated step verifies the app unpacked from
-the archive, so the hardening regression that shipped unnoticed for months cannot recur.
+ad-hoc build still exercises the signing path — real entitlements and the inside-out pass over
+Sparkle's nested helpers, minus the hardened runtime — and dedicated steps verify and launch the app
+unpacked from the archive, so neither the hardening regression that shipped unnoticed for months
+nor an unlaunchable build can recur.
 
 `.github/workflows/release.yml` signs, notarizes, and staples when the secrets below are present.
 
