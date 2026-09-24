@@ -19,8 +19,6 @@ final class PopupModeStoreTests: XCTestCase {
         XCTAssertEqual(store.mode, PopupMode.content)
         XCTAssertEqual(store.resultCard?.text, "hi")
         XCTAssertEqual(store.resultCard?.title, "AI Tools")
-        XCTAssertNotEqual(PopupMode.actions, PopupMode.content)
-        XCTAssertNotEqual(PopupMode.search, PopupMode.content)
     }
 
     func testResultCardPayloadFlagsError() {

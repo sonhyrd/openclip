@@ -40,6 +40,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         Log.addSink(rotatingSink)
         _ = DebugLogStore.shared
 
+        OpenSelection.logger = { message in
+            Log.selection.debug("\(message, privacy: .public)")
+        }
+
         // Remove temporary calendar .ics files a previous session left behind before its
         // deferred cleanup could run (crash or quit during the delay window).
         DefaultActionResultHandler.purgeStaleCalendarTempFiles()
@@ -57,6 +61,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         case .dumpLogs(let options):
             runDumpLogsCommand(options)
             return
+        case .dumpSettings:
+            runDumpSettingsCommand()
+            return
         case .none:
             break
         }
@@ -73,19 +80,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         
         // Initialize the status bar controller
         statusBarController = StatusBarController()
+
+        // Deep links can open Preferences (the `open-settings` command); the router is otherwise
+        // self-contained. Configured before any `application(_:open:)` call can arrive.
+        DeepLinkRouter.shared.configure { [weak self] in
+            self?.statusBarController?.showPreferences()
+        }
         
         // Setup popup controller
         let controller = PopupWindowController()
         popupController = controller
         
+        // Setup selection monitor
+        let macMonitor = MacSelectionMonitor()
+        // Presentation gate only: "Appear Automatically" is evaluated by the monitor on its
+        // passive (mouse-release/keyboard) path, not here — the explicit hold gesture and the
+        // ⌥⌘C hotkey must still summon the popup with it off. Global Pause is rechecked at
+        // delivery time here because the hold/retrieval sleeps can outlast the pause toggle.
+        macMonitor.onSelection = { [weak self] context, canPaste in
+            let isPaused = DefaultSettingsStore.shared.get(.pauseUntilTimestamp) > Date().timeIntervalSince1970
+            if !isPaused {
+                // A real selection means the user has seen (or no longer needs) the nudge.
+                self?.coachMarkController?.dismiss()
+                self?.popupController?.show(for: context, pasteAvailable: canPaste)
+            }
+        }
+        macMonitor.preparePasteProbe = { [weak self] app, policy in
+            self?.popupController?.preparePasteProbe(for: app, policy: policy)
+        }
+        // When a user has dragged a result card aside, selecting text in that same source app
+        // should not re-open the action bar over the card being viewed. Other apps remain unsuppressed.
+        macMonitor.isSuppressedForApp = { [weak self] bundleID in
+            guard let self, let popup = self.popupController, popup.cardIsModal,
+                  let source = popup.sourceAppBundleID, let bundleID else { return false }
+            return bundleID == source
+        }
+        selectionMonitor = macMonitor
+
         // Setup global shortcut hotkey manager
-        HotkeyManager.shared.setup(popupController: controller)
+        HotkeyManager.shared.setup(popupController: controller, selectionMonitor: macMonitor)
 
         Task {
             let optionStore = SecretActionOptionStore()
             ExtensionManager.shared.actionFactory = DefaultActionFactory(optionStore: optionStore)
             ExtensionManager.shared.optionWriter = optionStore
+            ExtensionManager.shared.optionReader = optionStore
             ExtensionManager.shared.settingsStore = DefaultSettingsStore.shared
+            CustomActionJSRunnerRegistry.runner = DefaultCustomActionJSRunner()
             await ActionCoordinator.shared.loadInitialState(
                 dictionaryLookup: DictionaryLookupFactory.systemLookup
             )
@@ -102,21 +143,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             startExtensionWatcher()
         }
         
-        // Setup selection monitor
-        let macMonitor = MacSelectionMonitor()
-        macMonitor.onSelection = { [weak self] context, canPaste in
-            let isEnabled = DefaultSettingsStore.shared.get(.isAppEnabled)
-            let isPaused = DefaultSettingsStore.shared.get(.pauseUntilTimestamp) > Date().timeIntervalSince1970
-            if isEnabled && !isPaused {
-                // A real selection means the user has seen (or no longer needs) the nudge.
-                self?.coachMarkController?.dismiss()
-                self?.popupController?.show(for: context, pasteAvailable: canPaste)
-            }
-        }
-        macMonitor.preparePasteProbe = { [weak self] app, policy in
-            self?.popupController?.preparePasteProbe(for: app, policy: policy)
-        }
-        selectionMonitor = macMonitor
         guard NSClassFromString("XCTestCase") == nil else { return }
 
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
@@ -146,9 +172,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             if !isGranted {
                 showPermissionRecovery(isUpdate: true)
             } else {
-                if isAppEnabled {
-                    selectionMonitor?.start()
-                }
+                selectionMonitor?.start()
                 showPostOnboardingCoachMark()
             }
         case .permissionRecovery:
@@ -158,7 +182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 DefaultSettingsStore.shared.set(.lastRunVersion, value: currentVersion)
                 DefaultSettingsStore.shared.set(.lastRunBuild, value: currentBuild)
             }
-            if isGranted && isAppEnabled {
+            if isGranted {
                 selectionMonitor?.start()
             }
             showPostOnboardingCoachMark()
@@ -182,19 +206,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             forName: .openClipEnabledStateChanged,
             object: nil,
             queue: .main
-        ) { [weak self] notification in
-            let explicitState = notification.object as? Bool
-            Task { @MainActor in
-                let enabled = explicitState ?? DefaultSettingsStore.shared.get(.isAppEnabled)
-                if enabled {
-                    let granted = PermissionManager.shared.isAccessibilityGranted
-                    if granted {
-                        self?.selectionMonitor?.start()
-                    }
-                } else {
-                    self?.selectionMonitor?.stop()
-                }
-            }
+        ) { _ in
+            // "Appear Automatically" is evaluated by the selection monitor on its passive
+            // (mouse-release/keyboard) path. The selection monitor remains running so the
+            // explicit hold gesture and hotkeys (⌥⌘C) have immediate access to the selection.
         }
 
         NotificationCenter.default.addObserver(
@@ -204,10 +219,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         ) { [weak self] notification in
             let granted = (notification.object as? Bool) ?? PermissionManager.shared.isAccessibilityGranted
             Task { @MainActor in
-                let enabled = DefaultSettingsStore.shared.get(.isAppEnabled)
-                if granted && enabled {
+                if granted {
                     self?.selectionMonitor?.start()
-                } else if !granted {
+                } else {
                     self?.selectionMonitor?.stop()
                 }
             }
@@ -222,7 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         popupController?.isOnboardingVisible = true
         onboardingWindowController = OnboardingWindowController { [weak self] in
             self?.popupController?.isOnboardingVisible = false
-            if DefaultSettingsStore.shared.get(.isAppEnabled) {
+            if PermissionManager.shared.isAccessibilityGranted {
                 self?.selectionMonitor?.start()
             }
             self?.showPostOnboardingCoachMark()
@@ -239,7 +253,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let currentBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
                 DefaultSettingsStore.shared.set(.lastRunVersion, value: currentVersion)
                 DefaultSettingsStore.shared.set(.lastRunBuild, value: currentBuild)
-                if DefaultSettingsStore.shared.get(.isAppEnabled) {
+                if PermissionManager.shared.isAccessibilityGranted {
                     self?.selectionMonitor?.start()
                 }
                 self?.showPostOnboardingCoachMark()
@@ -293,7 +307,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             let optionStore = SecretActionOptionStore()
             ExtensionManager.shared.actionFactory = DefaultActionFactory(optionStore: optionStore)
             ExtensionManager.shared.optionWriter = optionStore
+            ExtensionManager.shared.optionReader = optionStore
             ExtensionManager.shared.settingsStore = DefaultSettingsStore.shared
+            CustomActionJSRunnerRegistry.runner = DefaultCustomActionJSRunner()
             await ActionCoordinator.shared.loadInitialState(
                 dictionaryLookup: DictionaryLookupFactory.systemLookup
             )
@@ -312,54 +328,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    public nonisolated static func parseDeepLinkURL(_ url: URL) -> [String: String]? {
-        guard url.scheme?.lowercased() == "openclip", url.host == "install" else { return nil }
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let queryItems = components.queryItems else { return nil }
-        
-        var dict: [String: String] = [:]
-        for item in queryItems {
-            if let val = item.value {
-                dict[item.name] = val
+    /// Runs the app in `--dump-settings` mode: loads the normal startup state (so extension and
+    /// per-action hotkeys are known), captures a JSON snapshot of every known setting, prints it,
+    /// and exits.
+    private func runDumpSettingsCommand() {
+        Task {
+            let optionStore = SecretActionOptionStore()
+            ExtensionManager.shared.actionFactory = DefaultActionFactory(optionStore: optionStore)
+            ExtensionManager.shared.optionWriter = optionStore
+            ExtensionManager.shared.optionReader = optionStore
+            ExtensionManager.shared.settingsStore = DefaultSettingsStore.shared
+            CustomActionJSRunnerRegistry.runner = DefaultCustomActionJSRunner()
+            await ActionCoordinator.shared.loadInitialState(
+                dictionaryLookup: DictionaryLookupFactory.systemLookup
+            )
+            let actionIDs = ActionCoordinator.shared.actions
+                .filter { ActionIdentity.isBindable($0) }
+                .map(\.id)
+            let snapshot = SettingsSnapshotter.capture(
+                store: DefaultSettingsStore.shared,
+                keys: SettingsCatalog.all(actionIDs: actionIDs),
+                appVersion: DebugLogCommand.version
+            )
+            if let data = try? snapshot.encoded(), let text = String(data: data, encoding: .utf8) {
+                print(text)
             }
+            exit(0)
         }
+    }
+
+    /// Install-only parameter extraction, kept for the existing store deep-link tests. New code
+    /// parses through `OpenClipDeepLink`; `DeepLinkRouter` owns the actual handling.
+    public nonisolated static func parseDeepLinkURL(_ url: URL) -> [String: String]? {
+        guard case .install(let id, let name, let downloadURL) = OpenClipDeepLink.parse(url) else {
+            return nil
+        }
+        var dict: [String: String] = ["id": id, "url": downloadURL.absoluteString]
+        if let name { dict["name"] = name }
         return dict
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            guard let params = Self.parseDeepLinkURL(url),
-                  let downloadStr = params["url"],
-                  let downloadURL = URL(string: downloadStr),
-                  let extID = params["id"] else { continue }
-            
-            guard let host = downloadURL.host?.lowercased(),
-                  RemoteExtensionInstaller.allowedDownloadHosts.contains(host) else {
-                continue
-            }
-            
-            let alert = NSAlert()
-            alert.messageText = String(localized: "Install Extension?")
-            alert.informativeText = String(localized: "OpenClip wants to install the extension \"\(extID)\" from \(host). Extensions can run scripts when you select text. Only proceed if you trust this source.")
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: String(localized: "Install"))
-            alert.addButton(withTitle: String(localized: "Cancel"))
-            guard alert.runModal() == .alertFirstButtonReturn else { continue }
-            
-            Task { @MainActor in
-                do {
-                    ExtensionManager.shared.prepareInstall(source: "store", packageID: extID)
-                    _ = try await RemoteExtensionInstaller.shared.installFromRemoteURL(downloadURL, extensionID: extID)
-                    await ExtensionUpdateManager.shared.checkForUpdates()
-                } catch {
-                    Log.extensions.error("Failed to install extension '\(extID, privacy: .public)' from host \(host, privacy: .public): \(error.localizedDescription, privacy: .private)")
-                    let failure = NSAlert()
-                    failure.messageText = String(localized: "Extension Install Failed")
-                    failure.informativeText = String(localized: "OpenClip could not install \"\(extID)\": \(error.localizedDescription)")
-                    failure.alertStyle = .warning
-                    failure.runModal()
-                }
-            }
+            DeepLinkRouter.shared.handle(url)
         }
     }
 

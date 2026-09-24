@@ -16,6 +16,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private let notificationCenter: NotificationCenter
     private var statusItem: NSStatusItem?
     private var preferencesWindow: NSWindow?
+    private var preferencesToolbarController: PreferencesToolbarController?
     private var rootMenu: NSMenu?
     internal var resumeItem: NSMenuItem?
     internal var toggleEnabledItem: NSMenuItem?
@@ -162,7 +163,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Section 2: Core App Navigation
-        let prefsItem = menuItem(title: String(localized: "Settings…"), action: #selector(showPreferences), keyEquivalent: ",")
+        let prefsItem = menuItem(title: String(localized: "Settings…"), action: #selector(showPreferences as () -> Void), keyEquivalent: ",")
         menu.addItem(prefsItem)
 
         let actionsMenu = NSMenu(title: String(localized: "Actions"))
@@ -538,7 +539,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     
     /// Decision 8 config-open path: an action requested its configuration. The popup has already
     /// hidden; open Preferences and hand the request to the coordinator so PreferencesView can
-    /// present the matching EditActionSheet (the window may not have existed yet).
+    /// present the matching ActionEditorPage (the window may not have existed yet).
     @objc private func handleOpenConfiguration(_ notification: Notification) {
         showPreferences()
     }
@@ -588,27 +589,20 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
     
+    /// Opens Settings on whatever pane (and drill-down) was last shown. The menu item and the
+    /// Dock reopen use this: a reused window already holds the router's last path, and resetting
+    /// to General here is what used to throw the user back to the top on every reopen.
     @objc public func showPreferences() {
-        showPreferences(tab: .general)
+        presentPreferences(tab: nil)
     }
 
-    public func showPreferences(tab: PreferenceTab = .general) {
-        if let window = preferencesWindow, window.isVisible {
-            notificationCenter.post(name: .openClipSelectPreferencesTab, object: tab)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let controller = NSHostingController(rootView: PreferencesView(initialTab: tab))
-        let window = NSWindow(contentViewController: controller)
-        window.title = String(localized: "OpenClip Preferences")
-        window.setContentSize(NSSize(width: 760, height: 620))
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.center()
-        self.preferencesWindow = window
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    /// Opens Settings on a named pane, overriding wherever the window was — how a deep link
+    /// (the status menu's Actions item, an action asking to be configured) should behave.
+    public func showPreferences(tab: PreferenceTab) {
+        presentPreferences(tab: tab)
+    }
+
+    private func presentPreferences(tab: PreferenceTab?) {
+        SettingsWindowController.show(tab: tab)
     }
 }

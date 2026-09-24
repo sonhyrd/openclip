@@ -13,9 +13,9 @@ struct ToastView: View {
 
     @State private var isHovered = false
 
-    @AppStorage(SettingKey.popupTheme.name) private var selectedTheme: String = SettingKey.popupTheme.defaultValue
-    @AppStorage(SettingKey.popupThemeColor.name) private var themeColor: String = SettingKey.popupThemeColor.defaultValue
-    @AppStorage(SettingKey.popupScale.name) private var popupScale: Int = SettingKey.popupScale.defaultValue
+    @Setting(SettingKey.popupTheme) private var selectedTheme
+    @Setting(SettingKey.popupThemeColor) private var themeColor
+    @Setting(SettingKey.popupScale) private var popupScale
     @Environment(\.colorScheme) private var colorScheme
 
     /// Visual multiplier derived from the user's Popup Scale level (1...5) so the toast keeps pace
@@ -38,15 +38,6 @@ struct ToastView: View {
         PopupThemeModel.effectiveScheme(appearance: themeColor, systemIsDark: colorScheme == .dark)
     }
 
-
-    private var opaqueBackground: Color {
-        effectiveTheme == "dark" ? Color(red: 0.20, green: 0.20, blue: 0.22) : Color(red: 0.91, green: 0.91, blue: 0.93)
-    }
-
-    private var opaqueBorder: Color {
-        effectiveTheme == "light" ? Color.black.opacity(0.18) : Color.white.opacity(0.18)
-    }
-
     private var textColor: Color {
         switch feedback.style {
         case .error:
@@ -56,9 +47,24 @@ struct ToastView: View {
         }
     }
 
+    /// Formats a raw feedback message for presentation: flattens multiline text into single-line
+    /// and truncates with an ellipsis if it exceeds `limit`.
+    static func formatMessage(_ message: String, limit: Int = PopupMetrics.toastMaxCharacterLength) -> String {
+        let singleLine = message
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard singleLine.count > limit else { return singleLine }
+        guard limit > 1 else { return String(singleLine.prefix(limit)) }
+        return String(singleLine.prefix(limit - 1)) + "…"
+    }
+
     var body: some View {
         let isInteractive = feedback.isLoading && onCancel != nil
-        let displayedMessage = (isInteractive && isHovered) ? String(localized: "Cancel Task") : feedback.message
+        let formattedMessage = Self.formatMessage(feedback.message)
+        let displayedMessage = (isInteractive && isHovered) ? String(localized: "Cancel Task") : formattedMessage
         let activeForeground: Color = (isInteractive && isHovered) ? .white : textColor
 
         let content = HStack(spacing: 6 * scale) {
@@ -104,14 +110,53 @@ struct ToastView: View {
                     )
                     .shadow(color: Color.black.opacity(effectiveColorScheme == .dark ? 0.25 : 0.15), radius: 4, x: 0, y: 1)
             } else {
+                let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 content
-                    .background((isInteractive && isHovered) ? Color.accentColor : opaqueBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .stroke((isInteractive && isHovered) ? Color.accentColor : opaqueBorder, lineWidth: 1.0)
+                    .background(
+                        Group {
+                            if isInteractive && isHovered {
+                                shape.fill(Color.accentColor)
+                            } else {
+                                PopupThemeModel.classicSurfaceBackground(for: effectiveColorScheme, in: shape)
+                            }
+                        }
                     )
-                    .shadow(color: Color.black.opacity(effectiveTheme == "light" ? 0.10 : 0.20), radius: 4, x: 0, y: 1)
+                    .clipShape(shape)
+                    .overlay(
+                        shape.stroke(
+                            (isInteractive && isHovered)
+                                ? AnyShapeStyle(Color.accentColor)
+                                : AnyShapeStyle(
+                                    LinearGradient(
+                                        colors: effectiveColorScheme == .dark
+                                            ? [Color.white.opacity(0.20), Color.white.opacity(0.08)]
+                                            : [Color.black.opacity(0.18), Color.black.opacity(0.08)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                ),
+                            lineWidth: 1.0
+                        )
+                    )
+                    .overlay(
+                        Group {
+                            if !(isInteractive && isHovered) {
+                                shape.inset(by: 0.5).stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(effectiveColorScheme == .dark ? 0.32 : 0.65),
+                                            Color.white.opacity(0.0)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 1.0
+                                )
+                                .allowsHitTesting(false)
+                            }
+                        }
+                    )
+                    .shadow(color: Color.black.opacity(effectiveColorScheme == .dark ? 0.28 : 0.12), radius: 4, x: 0, y: 1.5)
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -149,9 +194,12 @@ private struct ToastSpinnerView: View {
         }
         .frame(width: 16 * scale, height: 16 * scale)
         .rotationEffect(.degrees(isSpinning ? 360 : 0))
-        .animation(.linear(duration: 0.8).repeatForever(autoreverses: false), value: isSpinning)
+        .animation(isSpinning ? .linear(duration: 0.8).repeatForever(autoreverses: false) : nil, value: isSpinning)
         .onAppear {
             isSpinning = true
+        }
+        .onDisappear {
+            isSpinning = false
         }
     }
 }

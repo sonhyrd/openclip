@@ -50,15 +50,19 @@ The entry is called as `(selection, options)`, exactly like the single-file cont
 - else `index.js` in the directory (`require('./lib')` → `./lib/index.js`).
 
 Modules are cached **per run** — a second `require` of the same resolved path returns the same
-`exports`. Cycles resolve to partial exports, Node-style.
+`exports`. Cycles resolve to partial exports, Node-style. Paths are symlink-resolved, so an
+in-package symlink and its target are one module and its `__dirname` is the target's directory
+(Node's default without `--preserve-symlinks`).
 
 ### 1c. Containment
 
-A script's filesystem reach is **the extension package directory only**. The host resolves symlinks
-before checking, then enforces the package boundary (`OpenClipModuleLoader` +
-`Constants.isPathSafe`). A `require` that resolves outside the package — a `../` escape or a symlink
-pointing out — throws, and the run surfaces as `.toast(.error)` with "resolves outside the
-extension package". Absolute-path specifiers are rejected outright.
+Module resolution is scoped to **the extension package directory**. The host resolves
+symlinks on the file candidate — the exact match, the `.js` fallback, and the `index.js`
+fallback alike — and enforces a canonical path-component boundary (`OpenClipModuleLoader` +
+`Constants.isPathSafe`) on the opened file descriptor. A `require` that resolves outside the
+package directory — such as a `../` escape or a symlink pointing out — throws, and the run
+surfaces as `.toast(.error)` with "resolves outside the extension package". Absolute-path specifiers
+are rejected outright.
 
 ### 1d. Rejected specifiers
 
@@ -74,11 +78,11 @@ extension package". Absolute-path specifiers are rejected outright.
 When you need third-party libraries or TypeScript, scaffold with `--with-npm`:
 
 ```bash
-./scripts/new_extension.sh Demo --with-npm
+./Extensions/scripts/create.sh Demo --type js --with-npm
 cd Extensions/raw/Demo.openclipext
 npm install         # once
 npm run build       # after every edit to src/
-./scripts/install_extension.sh Extensions/raw/Demo.openclipext
+../../scripts/install.sh .
 ```
 
 The scaffold writes a `package.json` (esbuild + TypeScript dev deps), `tsconfig.json`,
@@ -92,9 +96,9 @@ only that one file. The contract:
 
 - `npm install` once (regenerates `node_modules`).
 - `npm run build` after **every** edit to `src/` — the bundle is stale otherwise.
-- THEN `install_extension.sh`.
+- THEN `../../scripts/install.sh .` (or from the repository root: `./Extensions/scripts/install.sh Extensions/raw/Demo.openclipext`).
 
-`validate_extension.sh` enforces this: an npm package without `dist/main.js` fails install (exit 1,
+`validate.sh` enforces this: an npm package without `dist/main.js` fails install (exit 1,
 "run 'npm install && npm run build'"), and a `dist/main.js` older than `package.json` or anything in
 `src/` produces a rebuild warning.
 
@@ -159,4 +163,4 @@ extension code):
 
 - Module resolution & containment: `Sources/OpenClip/Platform/Runtimes/OpenClipModuleLoader.swift`.
 - Module prelude/wrappers & entry dispatch: `Sources/OpenClip/Platform/Runtimes/OpenClipJSHost.swift`.
-- Scaffold/validate scripts: `scripts/new_extension.sh`, `scripts/validate_extension.sh`.
+- Scaffold/validate scripts: `Extensions/scripts/create.sh`, `Extensions/scripts/validate.sh`.

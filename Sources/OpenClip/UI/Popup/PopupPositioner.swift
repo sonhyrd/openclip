@@ -79,12 +79,6 @@ public struct PopupPositioner: Sendable {
         alignedX(releaseX: releaseX, width: width, screenBounds: screenBounds, alignment: .center)
     }
 
-    /// Returns a frame of `popupSize` centered horizontally and vertically within `screenBounds`.
-    public static func centerInScreen(popupSize: CGSize, screenBounds: CGRect) -> CGRect {
-        let x = screenBounds.midX - popupSize.width / 2
-        let y = screenBounds.midY - popupSize.height / 2
-        return CGRect(x: x, y: y, width: popupSize.width, height: popupSize.height)
-    }
 
     /// Horizontal midX for a search palette of `searchWidth` initiated from a button click at `buttonScreenMidX`
     /// within a bar whose right edge is `barMaxX`. The palette aligns with the button's center point

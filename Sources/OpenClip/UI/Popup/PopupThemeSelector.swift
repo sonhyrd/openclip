@@ -1,33 +1,31 @@
 // PopupThemeSelector.swift
 // OpenClip
 //
-// Lets the user pick the popup appearance as a grouped settings section (matching
-// the General tab's look). The Theme row picks the category — Classic (solid color
-// themes) or Glass (the material). The Mode row picks that category's appearance:
-// System/Light/Dark as square icon tiles, where System means follow the system
-// appearance (the historical Glass behavior). Choosing a forced appearance fixes
-// the low-contrast case where a light system renders near-white glass over a white
-// background.
+// Lets the user pick the popup appearance as grouped settings sections (matching
+// the General tab's look). Split into Theme & Style, and Position & Sizing cards.
 //
-// Storage: "popupTheme" keeps the category ("classic"/"glass"); "popupThemeColor"
-// keeps the shared appearance ("system"/"light"/"dark") used by both categories.
-// Legacy values of "popupTheme" resolve via PopupThemeModel.category(fromStored:).
+// Styled with modern SettingsCard, icon tiles, and hairline dividers.
+
 import SwiftUI
 import Core
 
 @MainActor
 struct PopupThemeSelector: View {
-    @AppStorage(SettingKey.popupTheme.name) private var theme: String = SettingKey.popupTheme.defaultValue
-    @AppStorage(SettingKey.popupThemeColor.name) private var themeColor: String = SettingKey.popupThemeColor.defaultValue
-    @AppStorage(SettingKey.popupScale.name) private var popupScale: Int = SettingKey.popupScale.defaultValue
-    @AppStorage(SettingKey.popupBarWidth.name) private var barWidthLevel: Int = SettingKey.popupBarWidth.defaultValue
-    @AppStorage(SettingKey.popupAlignment.name) private var popupAlignment: String = SettingKey.popupAlignment.defaultValue
-    @AppStorage(SettingKey.popupVerticalPosition.name) private var popupVerticalPosition: String = SettingKey.popupVerticalPosition.defaultValue
+    @Setting(SettingKey.popupTheme) private var theme
+    @Setting(SettingKey.popupThemeColor) private var themeColor
+    @Setting(SettingKey.popupScale) private var popupScale
+    @Setting(SettingKey.popupBarWidth) private var barWidthLevel
+    @Setting(SettingKey.popupAlignment) private var popupAlignment
+    @Setting(SettingKey.popupVerticalPosition) private var popupVerticalPosition
+    @Setting(SettingKey.contextualActionsEnabled) private var contextualActionsEnabled
+    @Setting(SettingKey.disabledContextualActionIDs) private var disabledContextualActionIDs
+
+    @State private var isShowingContextualPopover = false
 
     private struct AppearanceOption: Identifiable {
         let label: String
         let value: String
-        let icon: String
+        var icon: String? = nil
         var id: String { value }
     }
 
@@ -37,16 +35,10 @@ struct PopupThemeSelector: View {
 
     private var isGlassOn: Bool { category == .glass }
 
-    /// Shared tray geometry for both Theme and Mode rows.
-    private var trayHeight: CGFloat { 26 }
-    private var trayContentHeight: CGFloat { trayHeight - 4 }
-    private var segmentWidth: CGFloat { 56 }
-    private var modeSegmentWidth: CGFloat { 38 }
-
     private var themeOptions: [AppearanceOption] {
         [
-            AppearanceOption(label: "Classic", value: "classic", icon: ""),
-            AppearanceOption(label: "Glass", value: "glass", icon: "")
+            AppearanceOption(label: "Classic", value: "classic"),
+            AppearanceOption(label: "Glass", value: "glass")
         ]
     }
 
@@ -68,18 +60,10 @@ struct PopupThemeSelector: View {
 
     private var verticalPositionOptions: [AppearanceOption] {
         [
-            AppearanceOption(label: "Auto", value: "auto", icon: ""),
-            AppearanceOption(label: "Above", value: "above", icon: ""),
-            AppearanceOption(label: "Below", value: "below", icon: "")
+            AppearanceOption(label: "Auto", value: "auto"),
+            AppearanceOption(label: "Above", value: "above"),
+            AppearanceOption(label: "Below", value: "below")
         ]
-    }
-
-    private var activeAppearance: String {
-        themeColor
-    }
-
-    private func selectAppearance(_ value: String) {
-        themeColor = value
     }
 
     private var isAllDefault: Bool {
@@ -88,7 +72,9 @@ struct PopupThemeSelector: View {
         popupScale == SettingKey.popupScale.defaultValue &&
         barWidthLevel == SettingKey.popupBarWidth.defaultValue &&
         popupAlignment == SettingKey.popupAlignment.defaultValue &&
-        popupVerticalPosition == SettingKey.popupVerticalPosition.defaultValue
+        popupVerticalPosition == SettingKey.popupVerticalPosition.defaultValue &&
+        contextualActionsEnabled == SettingKey.contextualActionsEnabled.defaultValue &&
+        disabledContextualActionIDs == SettingKey.disabledContextualActionIDs.defaultValue
     }
 
     private func resetToDefaults() {
@@ -98,271 +84,251 @@ struct PopupThemeSelector: View {
         barWidthLevel = SettingKey.popupBarWidth.defaultValue
         popupAlignment = SettingKey.popupAlignment.defaultValue
         popupVerticalPosition = SettingKey.popupVerticalPosition.defaultValue
+        contextualActionsEnabled = SettingKey.contextualActionsEnabled.defaultValue
+        disabledContextualActionIDs = SettingKey.disabledContextualActionIDs.defaultValue
+    }
+
+    private var themeSelection: Binding<String> {
+        Binding(
+            get: { isGlassOn ? "glass" : "classic" },
+            set: { theme = $0 }
+        )
+    }
+
+    private func scaleLabel(for level: Int) -> String {
+        switch level {
+        case 1: return "85%"
+        case 2: return "92%"
+        case 3: return "100%"
+        case 4: return "110%"
+        case 5: return "122%"
+        default: return "100%"
+        }
+    }
+
+    private func widthLabel(for level: Int) -> String {
+        switch level {
+        case 1: return "Compact"
+        case 2: return "Moderate"
+        case 3: return "Default"
+        case 4: return "Wide"
+        case 5: return "Maximum"
+        default: return "Default"
+        }
     }
 
     var body: some View {
-        Form {
-            Section {
-                themeRow
-                modeRow
-                alignmentRow
-                verticalPositionRow
-                sizeRow
-                barWidthRow
-            } footer: {
-                HStack {
-                    Spacer()
-                    Button("Reset to Defaults") {
-                        resetToDefaults()
+        VStack(spacing: 20) {
+            SettingsCard("Theme & Style") {
+                SettingsRow(
+                    title: "Popup Theme",
+                    systemImage: "paintbrush.fill",
+                    iconTileTint: Color(red: 0.93, green: 0.28, blue: 0.60)
+                ) {
+                    segmentedPicker(
+                        selection: themeSelection,
+                        options: themeOptions,
+                        label: "Popup Theme",
+                        width: 170
+                    )
+                }
+
+                SettingsDivider()
+
+                SettingsRow(
+                    title: "Color Mode",
+                    systemImage: "sun.max.fill",
+                    iconTileTint: Color(red: 0.96, green: 0.62, blue: 0.05)
+                ) {
+                    iconPicker(
+                        selection: $themeColor,
+                        options: appearanceOptions,
+                        label: "Color Mode",
+                        width: 170
+                    )
+                }
+            }
+
+            SettingsCard("Position & Sizing") {
+                SettingsRow(
+                    title: "Horizontal Position",
+                    systemImage: "text.aligncenter",
+                    iconTileTint: Color(red: 0.05, green: 0.72, blue: 0.85)
+                ) {
+                    iconPicker(
+                        selection: $popupAlignment,
+                        options: alignmentOptions,
+                        label: "Horizontal Position",
+                        width: 170
+                    )
+                }
+
+                SettingsDivider()
+
+                SettingsRow(
+                    title: "Vertical Position",
+                    systemImage: "arrow.up.and.down",
+                    iconTileTint: Color(red: 0.20, green: 0.78, blue: 0.42)
+                ) {
+                    segmentedPicker(
+                        selection: $popupVerticalPosition,
+                        options: verticalPositionOptions,
+                        label: "Vertical Position",
+                        width: 170
+                    )
+                }
+
+                SettingsDivider()
+
+                SettingsRow(
+                    title: "Popup Scale",
+                    systemImage: "arrow.up.left.and.arrow.down.right",
+                    iconTileTint: Color(red: 0.98, green: 0.52, blue: 0.12)
+                ) {
+                    stepSlider(
+                        value: Binding(
+                            get: { popupScale },
+                            set: { popupScale = $0 }
+                        ),
+                        accessibilityLabel: "Popup Scale",
+                        labelText: scaleLabel(for: popupScale)
+                    )
+                }
+
+                SettingsDivider()
+
+                SettingsRow(
+                    title: "Popup Width",
+                    systemImage: "arrow.left.and.right",
+                    iconTileTint: Color(red: 0.68, green: 0.35, blue: 0.98)
+                ) {
+                    stepSlider(
+                        value: Binding(
+                            get: { barWidthLevel },
+                            set: { barWidthLevel = $0 }
+                        ),
+                        accessibilityLabel: "Popup Width",
+                        labelText: widthLabel(for: barWidthLevel)
+                    )
+                }
+            }
+
+            SettingsCard("Behavior") {
+                SettingsRow(
+                    title: "Contextual Actions",
+                    subtitle: "Show relevant actions first based on what you select.",
+                    systemImage: "lightbulb.fill"
+                ) {
+                    HStack(spacing: 8) {
+                        Button {
+                            isShowingContextualPopover.toggle()
+                        } label: {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(contextualActionsEnabled ? SettingsDesignTokens.primaryText : SettingsDesignTokens.tertiaryText)
+                                .frame(width: 24, height: 24)
+                                .settingsGlassCircle()
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!contextualActionsEnabled)
+                        .help(String(localized: "Configure Contextual Actions"))
+                        .popover(isPresented: $isShowingContextualPopover, arrowEdge: .top) {
+                            ContextualActionsPopoverView()
+                        }
+
+                        Toggle("", isOn: $contextualActionsEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .accessibilityLabel(String(localized: "Enable Contextual Actions"))
                     }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundColor(.accentColor)
-                    .disabled(isAllDefault)
-                    .opacity(isAllDefault ? 0.4 : 1.0)
                 }
-                .padding(.top, 6)
             }
-        }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-    }
 
-    private var themeRow: some View {
-        HStack(spacing: 12) {
-            rowTitle(icon: "paintbrush.fill", title: "Popup Theme")
-            Spacer()
-            labelSegments(
-                options: themeOptions,
-                isSelected: { isGlassOn ? $0.value == "glass" : $0.value == "classic" },
-                select: { theme = $0 }
-            )
-        }
-        .frame(minHeight: 24)
-        .padding(.vertical, 3)
-    }
-
-    private var modeRow: some View {
-        HStack(spacing: 12) {
-            rowTitle(icon: "circle.lefthalf.filled", title: "Color Mode")
-            Spacer()
-            iconTiles(
-                options: appearanceOptions,
-                isSelected: { activeAppearance == $0.value },
-                select: selectAppearance
-            )
-        }
-        .frame(minHeight: 24)
-        .padding(.vertical, 3)
-    }
-
-    private var alignmentRow: some View {
-        HStack(spacing: 12) {
-            rowTitle(icon: "text.alignleft", title: "Horizontal Position")
-            Spacer()
-            iconTiles(
-                options: alignmentOptions,
-                isSelected: { popupAlignment == $0.value },
-                select: { popupAlignment = $0 }
-            )
-        }
-        .frame(minHeight: 24)
-        .padding(.vertical, 3)
-    }
-
-    private var verticalPositionRow: some View {
-        HStack(spacing: 12) {
-            rowTitle(icon: "arrow.up.and.down", title: "Vertical Position")
-            Spacer()
-            labelSegments(
-                options: verticalPositionOptions,
-                segmentWidth: 44,
-                isSelected: { popupVerticalPosition == $0.value },
-                select: { popupVerticalPosition = $0 }
-            )
-        }
-        .frame(minHeight: 24)
-        .padding(.vertical, 3)
-    }
-
-    private var sizeRow: some View {
-        HStack(spacing: 12) {
-            rowTitle(
-                icon: "arrow.up.left.and.arrow.down.right",
-                title: "Popup Scale"
-            )
-            Spacer()
-            HStack(spacing: 8) {
-                Slider(
-                    value: Binding(
-                        get: { Double(popupScale) },
-                        set: { popupScale = max(1, min(5, Int(round($0)))) }
-                    ),
-                    in: 1...5,
-                    step: 1
-                )
-                .accessibilityLabel("Popup Scale")
-                .accessibilityValue("\(popupScale)")
-                .frame(width: 120)
-                Text("\(popupScale)")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .frame(width: 32, alignment: .trailing)
+            HStack {
+                Spacer()
+                Button {
+                    resetToDefaults()
+                } label: {
+                    Text(String(localized: "Reset"))
+                        .font(.system(size: 11.5, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
+                        .settingsGlassCapsule()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isAllDefault ? SettingsDesignTokens.tertiaryText : SettingsDesignTokens.secondaryText)
+                .disabled(isAllDefault)
             }
-        }
-        .frame(minHeight: 24)
-        .padding(.vertical, 3)
-    }
-
-    private var barWidthRow: some View {
-        HStack(spacing: 12) {
-            rowTitle(
-                icon: "arrow.left.and.right",
-                title: "Popup Width"
-            )
-            Spacer()
-            HStack(spacing: 8) {
-                Slider(
-                    value: Binding(
-                        get: { Double(barWidthLevel) },
-                        set: { barWidthLevel = max(1, min(5, Int(round($0)))) }
-                    ),
-                    in: 1...5,
-                    step: 1
-                )
-                .accessibilityLabel("Popup Width")
-                .accessibilityValue("\(barWidthLevel)")
-                .frame(width: 120)
-                Text("\(barWidthLevel)")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .frame(width: 32, alignment: .trailing)
-            }
-        }
-        .frame(minHeight: 24)
-        .padding(.vertical, 3)
-    }
-
-    private func rowTitle(icon: String, title: LocalizedStringKey) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 15))
-                .foregroundColor(.accentColor)
-                .frame(width: 20, alignment: .center)
-            Text(title)
-                .font(.body)
-                .fontWeight(.medium)
+            .padding(.top, 2)
         }
     }
 
-    /// Label-only segments for the Theme row.
-    private func labelSegments(
+    private func segmentedPicker(
+        selection: Binding<String>,
         options: [AppearanceOption],
-        segmentWidth: CGFloat = 56,
-        isSelected: @escaping (AppearanceOption) -> Bool,
-        select: @escaping (String) -> Void
-    ) -> some View {
-        HStack(spacing: 0) {
-            ForEach(options) { option in
-                if option.value != options[0].value {
-                    hairline(height: 12)
-                }
-                segmentButton(
-                    label: LocalizedStringKey(option.label),
-                    width: segmentWidth,
-                    isSelected: isSelected(option),
-                    action: { select(option.value) }
-                )
-            }
-        }
-        .padding(2)
-        .frame(height: trayHeight)
-        .background(segmentContainerBackground)
-        .overlay(segmentContainerBorder)
-    }
-
-    /// Icon-only segments for the Mode row matching the theme row size.
-    private func iconTiles(
-        options: [AppearanceOption],
-        isSelected: @escaping (AppearanceOption) -> Bool,
-        select: @escaping (String) -> Void
-    ) -> some View {
-        HStack(spacing: 0) {
-            ForEach(options) { option in
-                if option.value != options[0].value {
-                    hairline(height: 12)
-                }
-                tileButton(
-                    label: option.label,
-                    icon: option.icon,
-                    isSelected: isSelected(option),
-                    action: { select(option.value) }
-                )
-            }
-        }
-        .padding(2)
-        .frame(height: trayHeight)
-        .background(segmentContainerBackground)
-        .overlay(segmentContainerBorder)
-    }
-
-    private var segmentContainerBackground: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(Color.primary.opacity(0.055))
-    }
-
-    private var segmentContainerBorder: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-    }
-
-    /// Thin separator between the segments/tiles within a tray.
-    private func hairline(height: CGFloat = 14) -> some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.1))
-            .frame(width: 1, height: height)
-    }
-
-    private func segmentButton(
         label: LocalizedStringKey,
-        width: CGFloat = 56,
-        isSelected: Bool,
-        action: @escaping () -> Void
+        width: CGFloat = 170
     ) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(isSelected ? .white : .primary)
-                .frame(width: width, height: trayContentHeight)
-                .padding(.horizontal, 4)
-                .contentShape(Rectangle())
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(isSelected ? Color.accentColor : Color.clear)
-                )
+        Picker("", selection: selection) {
+            ForEach(options) { option in
+                Text(LocalizedStringKey(option.label)).tag(option.value)
+            }
         }
-        .buttonStyle(.plain)
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: width, height: 24)
+        .accessibilityLabel(label)
     }
 
-    private func tileButton(
-        label: String,
-        icon: String,
-        isSelected: Bool,
-        action: @escaping () -> Void
+    private func iconPicker(
+        selection: Binding<String>,
+        options: [AppearanceOption],
+        label: LocalizedStringKey,
+        width: CGFloat = 170
     ) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isSelected ? .white : .primary)
-                .frame(width: modeSegmentWidth, height: trayContentHeight)
-                .contentShape(Rectangle())
-                .help(LocalizedStringKey(label))
-                .accessibilityLabel(LocalizedStringKey(label))
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(isSelected ? Color.accentColor : Color.clear)
-                )
+        Picker("", selection: selection) {
+            ForEach(options) { option in
+                if let icon = option.icon {
+                    Image(systemName: icon)
+                        .help(LocalizedStringKey(option.label))
+                        .accessibilityLabel(LocalizedStringKey(option.label))
+                        .tag(option.value)
+                }
+            }
         }
-        .buttonStyle(.plain)
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: width, height: 24)
+        .accessibilityLabel(label)
+    }
+
+    private func stepSlider(
+        value: Binding<Int>,
+        accessibilityLabel: LocalizedStringKey,
+        labelText: String
+    ) -> some View {
+        HStack(spacing: 8) {
+            Slider(
+                value: Binding(
+                    get: { Double(value.wrappedValue) },
+                    set: { value.wrappedValue = max(1, min(5, Int(round($0)))) }
+                ),
+                in: 1...5,
+                step: 1
+            )
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityValue(labelText)
+            .frame(width: 110)
+
+            Text(labelText)
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(SettingsDesignTokens.secondaryText)
+                .frame(width: 52, alignment: .trailing)
+        }
+        .frame(width: 170, height: 24, alignment: .trailing)
     }
 }

@@ -168,7 +168,7 @@ final class PasteboardCopyEngineTests: XCTestCase {
             timeout: 1.0,
             restoreDelay: 0.05
         ) {
-            // Simulate the PopClip-style race: the changeCount advances with empty content first,
+            // Simulate transient clipboard race: the changeCount advances with empty content first,
             // then the real selection lands a beat later.
             Task { @MainActor in
                 pasteboard.clearContents()

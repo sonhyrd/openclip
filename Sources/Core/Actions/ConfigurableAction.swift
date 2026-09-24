@@ -8,3 +8,19 @@ import Foundation
 public protocol ConfigurableAction: Action {
     var preferenceIconName: String { get }
 }
+
+public extension ConfigurableAction {
+    var preferenceIconName: String {
+        switch icon {
+        case .symbol(let name):
+            return name
+        case .local(let url):
+            return url.lastPathComponent
+        case .url(let url):
+            return url.absoluteString
+        case .text(let txt):
+            return txt
+        }
+    }
+}
+

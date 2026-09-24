@@ -18,13 +18,18 @@ extension Notification.Name {
 public final class AIServiceManager: ObservableObject {
     public static let shared = AIServiceManager()
 
-    // `@AppStorage` does not automatically publish `objectWillChange`; forward manually
-    // so Preferences (and any other observers) refresh when settings change.
-    @AppStorage("aiEnabled") public var isAIEnabled: Bool = true {
-        willSet { objectWillChange.send() }
+    private let settingsStore = DefaultSettingsStore.shared
+
+    // Settings-backed properties route through SettingsStore (the single settings door) and
+    // manually forward `objectWillChange` so Preferences (and any other observers) refresh when
+    // a value changes. Key names and defaults are unchanged from the former @AppStorage surface.
+    public var isAIEnabled: Bool {
+        get { settingsStore.get(.isAIEnabled) }
+        set { objectWillChange.send(); settingsStore.set(.isAIEnabled, value: newValue) }
     }
-    @AppStorage("aiActiveProvider") public var activeProviderRaw: String = AIProviderType.apple.rawValue {
-        willSet { objectWillChange.send() }
+    public var activeProviderRaw: String {
+        get { settingsStore.get(.aiActiveProvider) }
+        set { objectWillChange.send(); settingsStore.set(.aiActiveProvider, value: newValue) }
     }
     // API key is stored in ~/.openclip/secrets.json via SecretStore.
     @Published public var cloudAPIKey: String {
@@ -40,200 +45,125 @@ public final class AIServiceManager: ObservableObject {
             }
         }
     }
-    @AppStorage("aiCloudService") public var cloudServiceRaw: String = "openai" {
-        willSet { objectWillChange.send() }
+    public var cloudServiceRaw: String {
+        get { settingsStore.get(.aiCloudService) }
+        set { objectWillChange.send(); settingsStore.set(.aiCloudService, value: newValue) }
     }
-    @AppStorage("aiCloudCustomURL") public var cloudCustomURL: String = "" {
-        willSet { objectWillChange.send() }
+    public var cloudCustomURL: String {
+        get { settingsStore.get(.aiCloudCustomURL) }
+        set { objectWillChange.send(); settingsStore.set(.aiCloudCustomURL, value: newValue) }
     }
-    @AppStorage("aiCloudModel") public var cloudModel: String = "gpt-4o-mini" {
-        willSet { objectWillChange.send() }
+    public var cloudModel: String {
+        get { settingsStore.get(.aiCloudModel) }
+        set { objectWillChange.send(); settingsStore.set(.aiCloudModel, value: newValue) }
     }
-    /// The Claude CLI wire id sent over `--model`. Defaults to the dated pin ADR 0001 verified; the
-    /// picker in Provider Settings offers the transcribed catalog. Same convention as `cloudModel`.
-    @AppStorage("aiClaudeCLIModel") public var claudeCLIModel: String = ClaudeCLI.defaultModel {
-        willSet { objectWillChange.send() }
+    public var localPresetRaw: String {
+        get { settingsStore.get(.aiLocalPreset) }
+        set { objectWillChange.send(); settingsStore.set(.aiLocalPreset, value: newValue) }
     }
-    /// The Codex CLI wire id sent over `-m`. Defaults to a stable literal, not the catalog's first
-    /// entry, which moves without notice.
-    @AppStorage("aiCodexModel") public var codexModel: String = CodexCLI.defaultModel {
-        willSet { objectWillChange.send() }
+    public var localURL: String {
+        get { settingsStore.get(.aiLocalURL) }
+        set { objectWillChange.send(); settingsStore.set(.aiLocalURL, value: newValue) }
     }
-    @AppStorage("aiOllamaURL") public var ollamaURL: String = "http://localhost:11434" {
-        willSet { objectWillChange.send() }
+    public var localModel: String {
+        get { settingsStore.get(.aiLocalModel) }
+        set { objectWillChange.send(); settingsStore.set(.aiLocalModel, value: newValue) }
     }
-    @AppStorage("aiOllamaModel") public var ollamaModel: String = "llama3" {
-        willSet { objectWillChange.send() }
+    public var cliPresetRaw: String {
+        get { settingsStore.get(.aiCLIPreset) }
+        set { objectWillChange.send(); settingsStore.set(.aiCLIPreset, value: newValue) }
     }
-    @AppStorage("aiBrowserPreset") public var browserPreset: String = "chatgpt" {
-        willSet { objectWillChange.send() }
+    public var cliCustomCommand: String {
+        get { settingsStore.get(.aiCLICustomCommand) }
+        set { objectWillChange.send(); settingsStore.set(.aiCLICustomCommand, value: newValue) }
     }
-    @AppStorage("aiBrowserURLTemplate") public var browserURLTemplate: String = "https://chatgpt.com/?q={text}" {
-        willSet { objectWillChange.send() }
+    public var cliModel: String {
+        get { settingsStore.get(.aiCLIModel) }
+        set { objectWillChange.send(); settingsStore.set(.aiCLIModel, value: newValue) }
     }
-    @AppStorage("aiActionPresetsJSON") public var actionPresetsJSON: String = "" {
-        willSet { objectWillChange.send() }
+    public var cliCustomModel: String {
+        get { settingsStore.get(.aiCLICustomModel) }
+        set { objectWillChange.send(); settingsStore.set(.aiCLICustomModel, value: newValue) }
     }
-
-    // MARK: - Claude Code CLI resolution cache
-    //
-    // Deliberately NOT persisted — no `@AppStorage`, no `SettingsStore`. A binary path is derived
-    // runtime state, not a setting: it goes stale across a CLI reinstall, a version-manager switch
-    // or a home-directory move, and a persisted stale path fails at spawn with a confusing error
-    // instead of simply being re-resolved. Do not "fix" this by persisting it. The repo's
-    // no-raw-`UserDefaults` rule governs settings; this is a cache. Cost: one login-shell spawn per
-    // app launch.
-    //
-    // It lives here, on the manager, rather than on the provider because `currentProvider` is a
-    // computed property that constructs a fresh provider on every access — a provider-held cache
-    // would be discarded between every call and each run would pay another login-shell spawn.
-
-    /// The resolved `claude` binary, or nil when resolution has not run or found nothing.
-    @Published public private(set) var claudeBinaryPath: String?
-
-    /// User-facing account of the last resolution attempt (shown in Preferences → AI). Empty until
-    /// resolution has run once.
-    @Published public private(set) var claudeResolutionDetail: String = ""
-
-    /// The cached path, resolving once on first use.
-    /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves — never a silent nil.
-    @discardableResult
-    public func resolvedClaudeBinaryPath() async throws -> String {
-        if let claudeBinaryPath { return claudeBinaryPath }
-        return try await redetectClaudeCLI()
+    public var cliCustomAuthCommand: String {
+        get { settingsStore.get(.aiCLICustomAuthCommand) }
+        set { objectWillChange.send(); settingsStore.set(.aiCLICustomAuthCommand, value: newValue) }
+    }
+    public var localCustomModel: String {
+        get { settingsStore.get(.aiLocalCustomModel) }
+        set { objectWillChange.send(); settingsStore.set(.aiLocalCustomModel, value: newValue) }
+    }
+    public var cloudCustomModel: String {
+        get { settingsStore.get(.aiCloudCustomModel) }
+        set { objectWillChange.send(); settingsStore.set(.aiCloudCustomModel, value: newValue) }
     }
 
-    /// Re-detection entry point: runs resolution again and overwrites both published values.
-    /// - Throws: `ClaudeCLI.Failure.notFound` when nothing resolves.
-    @discardableResult
-    public func redetectClaudeCLI() async throws -> String {
-        let (path, detail) = try await Self.detectBinary(
-            named: ClaudeCLI.binaryName,
-            notFound: String(localized: "claude not found — install Claude Code and run `claude login`")
-        )
-        claudeBinaryPath = path
-        claudeResolutionDetail = detail
-        guard let path else {
-            Log.ai.error("Claude CLI not found via login shell or known install directories")
-            throw ClaudeCLI.Failure.notFound
+    public var effectiveCLIModel: String {
+        if cliModel == "custom" {
+            return cliCustomModel.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        // `.public` on a `~/…` path that contains the username, deliberately: a redacted path
-        // defeats the entire diagnostic purpose for this feature's number-one failure mode, and the
-        // same path is already shown to the user in Preferences → AI.
-        Log.ai.info("Claude CLI resolved at \(path, privacy: .public)")
-        return path
+        return (cliModel == "default") ? "" : cliModel
     }
 
-    // MARK: - Codex CLI resolution cache and catalog
-    //
-    // The same shape as the Claude cache above, for the same reasons: a binary path is runtime
-    // state, never persisted. The catalog is cached per app launch too — it is what the installed
-    // codex renders, and it only shapes the picker.
-
-    /// The resolved `codex` binary, or nil when resolution has not run or found nothing.
-    @Published public private(set) var codexBinaryPath: String?
-
-    /// User-facing account of the last codex resolution attempt. Empty until it has run once.
-    @Published public private(set) var codexResolutionDetail: String = ""
-
-    /// The models the installed codex lists, from `codex debug models`. Empty until fetched.
-    @Published public private(set) var codexModels: [CodexCLI.Model] = []
-
-    @discardableResult
-    public func resolvedCodexBinaryPath() async throws -> String {
-        if let codexBinaryPath { return codexBinaryPath }
-        return try await redetectCodexCLI()
+    public var effectiveLocalModel: String {
+        if localModel == "custom" {
+            return localCustomModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return localModel
     }
 
-    @discardableResult
-    public func redetectCodexCLI() async throws -> String {
-        let (path, detail) = try await Self.detectBinary(
-            named: CodexCLI.binaryName,
-            notFound: String(localized: "codex not found — install Codex and run `codex login`")
-        )
-        codexBinaryPath = path
-        codexResolutionDetail = detail
-        guard let path else {
-            Log.ai.error("Codex CLI not found via login shell or known install directories")
-            throw CodexCLI.Failure.notFound
+    public var effectiveCloudModel: String {
+        if cloudModel == "custom" {
+            let trimmed = cloudCustomModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? cloudServiceProvider.primaryModel : trimmed
         }
-        Log.ai.info("Codex CLI resolved at \(path, privacy: .public)")
-        return path
+        return (cloudModel == "default") ? cloudServiceProvider.primaryModel : cloudModel
     }
 
-    /// Runs `codex debug models` and replaces `codexModels`. Only ever called from the Codex
-    /// branch of Provider Settings — never at app launch. Same stripped environment, isolated
-    /// directory and discovery budget as a transform; the listing reads the user's config.toml
-    /// (`debug` takes no `--ignore-user-config`) and never runs a model.
-    /// - Throws: `CodexCLI.Failure` when the binary is missing, the listing fails or does not parse.
-    public func fetchCodexCatalog() async throws {
-        let binary = try await resolvedCodexBinaryPath()
-        let invocation = ShellProcessRunner.Invocation(
-            executableURL: URL(fileURLWithPath: binary),
-            arguments: CodexCLI.catalogArguments,
-            environment: CodexCLI.childEnvironment(inherited: ProcessInfo.processInfo.environment, binaryPath: binary),
-            timeout: ClaudeCLI.discoveryTimeout,
-            currentDirectoryURL: CodexCLI.isolatedWorkingDirectory()
-        )
-        let output = try await ShellProcessRunner.runCapturingExit(invocation)
-        guard output.terminationStatus == 0 else {
-            throw CodexCLI.Failure.exited(status: output.terminationStatus, stderr: output.stderr)
+    public var localPreset: LocalLLMPreset {
+        get { LocalLLMPreset(rawValue: localPresetRaw) ?? .lmstudio }
+        set {
+            localPresetRaw = newValue.rawValue
+            localURL = newValue.defaultBaseURL
+            if let first = newValue.defaultModels.first {
+                localModel = first
+            }
         }
-        guard let models = CodexCLI.decodeCatalog(stdout: output.stdout) else {
-            throw CodexCLI.Failure.malformedResponse
-        }
-        codexModels = models
-        Log.ai.info("Codex catalog listed \(models.count, privacy: .public) models")
     }
 
-    /// Login shell first, then the known install directories. Nonisolated: it only spawns a
-    /// subprocess and reads the filesystem; the caller lands both values back on the main actor.
-    /// - Throws: `CancellationError` when the login shell was cut short — a Provider Settings
-    ///   branch that left the screen mid-resolution must not record "not found" as the verdict.
-    private nonisolated static func detectBinary(named binaryName: String, notFound: String) async throws -> (path: String?, detail: String) {
-        if let path = await loginShellPath(of: binaryName) {
-            return (path, String(localized: "Found via login shell: \(path)"))
+    public var cliPreset: CLIPreset {
+        get { CLIPreset(rawValue: cliPresetRaw) ?? .claude }
+        set {
+            cliPresetRaw = newValue.rawValue
+            if let first = newValue.defaultModels.first {
+                cliModel = first
+            }
         }
-        try Task.checkCancellation()
-        if let path = ClaudeCLI.resolveOnDisk(binaryName: binaryName) {
-            return (path, String(localized: "Found on disk: \(path)"))
-        }
-        return (nil, notFound)
     }
 
-    /// `/bin/zsh -l -c "command -v <binary>"` — a **login** shell, because a GUI app launched from
-    /// Finder does not inherit the terminal's PATH. Without the `-l`, lookup fails on a machine
-    /// where the binary works perfectly well in Terminal, and that reads to the user as "the app
-    /// is broken". This is the CLI providers' number-one silent failure mode.
-    ///
-    /// Goes through the shared `ShellProcessRunner` executor (one watchdog, one process-group kill)
-    /// rather than a hand-rolled `Process`.
-    private nonisolated static func loginShellPath(of binaryName: String) async -> String? {
-        let invocation = ShellProcessRunner.Invocation(
-            executableURL: URL(fileURLWithPath: "/bin/zsh"),
-            arguments: ["-l", "-c", "command -v \(binaryName)"],
-            // The real environment, so HOME/USER are set and the login shell finds the profile
-            // files whose PATH exports are the whole point of using `-l`.
-            environment: ProcessInfo.processInfo.environment,
-            timeout: ClaudeCLI.discoveryTimeout
-        )
-        guard let output = try? await ShellProcessRunner.runCapturingExit(invocation),
-              output.terminationStatus == 0 else {
-            return nil
-        }
-        let candidate = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return ClaudeCLI.isUsableBinary(atPath: candidate) ? candidate : nil
+    /// Backwards-compatibility properties for existing settings
+    public var ollamaURL: String {
+        get { localURL }
+        set { localURL = newValue }
+    }
+    public var ollamaModel: String {
+        get { localModel }
+        set { localModel = newValue }
+    }
+    public var actionPresetsJSON: String {
+        get { settingsStore.get(.aiActionPresetsJSON) }
+        set { objectWillChange.send(); settingsStore.set(.aiActionPresetsJSON, value: newValue) }
     }
 
     public static let defaultPresets: [AIActionPreset] = [
-        AIActionPreset(id: "proofread", title: String(localized: "Proofread"), prompt: String(localized: "Fix all spelling, punctuation, and grammatical errors while preserving the original wording, tone, and formatting"), isEnabled: true),
-        AIActionPreset(id: "rewrite", title: String(localized: "Rewrite"), prompt: String(localized: "Rewrite to improve clarity, flow, and vocabulary while keeping the original meaning and language"), isEnabled: true),
-        AIActionPreset(id: "summarize", title: String(localized: "Summarize"), prompt: String(localized: "Provide a concise bulleted summary capturing the key points"), isEnabled: true),
-        AIActionPreset(id: "explain", title: String(localized: "Explain"), prompt: String(localized: "Explain the core concept clearly and concisely in simple terms"), isEnabled: true),
-        AIActionPreset(id: "translate", title: String(localized: "Translate"), prompt: String(localized: "Translate the text accurately into natural English"), isEnabled: true),
-        AIActionPreset(id: "fix_code", title: String(localized: "Fix Code"), prompt: String(localized: "Fix bugs, syntax errors, and logic issues in this code snippet. Return only the raw working code without markdown code blocks or explanations"), isEnabled: false),
-        AIActionPreset(id: "make_shorter", title: String(localized: "Make Shorter"), prompt: String(localized: "Condense this text to be as concise as possible while keeping all essential information"), isEnabled: false),
-        AIActionPreset(id: "formal_tone", title: String(localized: "Formal Tone"), prompt: String(localized: "Rewrite this text in a polished, professional, and formal tone"), isEnabled: false)
+        AIActionPreset(id: "proofread", title: String(localized: "Proofread"), prompt: String(localized: "Fix all spelling, punctuation, and grammar errors with the smallest possible changes. Preserve the original wording, tone, and formatting — do not rewrite or rephrase sentences"), isEnabled: true),
+        AIActionPreset(id: "rewrite", title: String(localized: "Rewrite"), prompt: String(localized: "Rewrite to improve clarity, flow, and word choice while keeping the original meaning, tone, language, and formatting"), isEnabled: true),
+        AIActionPreset(id: "summarize", title: String(localized: "Summarize"), prompt: String(localized: "Provide a concise bulleted summary of the key points, in the same language as the text. Include only essential information — no introduction or closing remarks"), isEnabled: true),
+        AIActionPreset(id: "explain", title: String(localized: "Explain"), prompt: String(localized: "Explain what the text means in clear, simple language, in the same language as the text. Cover the core idea and any important details a beginner would need"), isEnabled: true),
+        AIActionPreset(id: "translate", title: String(localized: "Translate"), prompt: String(localized: "Translate the text accurately into natural English, preserving the original meaning, tone, and formatting"), isEnabled: true),
+        AIActionPreset(id: "fix_code", title: String(localized: "Fix Code"), prompt: String(localized: "Fix bugs, syntax errors, and logic issues in this code. Keep the same programming language, style, and structure, and change as little as possible. Return only the raw working code — no markdown code fences, no explanations"), isEnabled: true),
+        AIActionPreset(id: "make_shorter", title: String(localized: "Make Shorter"), prompt: String(localized: "Condense this text to be significantly shorter while keeping all essential information, the original language, and the tone. Preserve the overall formatting such as paragraphs and lists"), isEnabled: true),
+        AIActionPreset(id: "formal_tone", title: String(localized: "Formal Tone"), prompt: String(localized: "Rewrite this text in a polished, professional, and formal tone. Keep the original meaning, language, and formatting; replace slang, contractions, and casual phrasing with formal equivalents"), isEnabled: true)
     ]
 
     private static let presetDecodeFailureLogged = OSAllocatedUnfairLock(initialState: false)
@@ -271,6 +201,71 @@ public final class AIServiceManager: ObservableObject {
     public var enabledPresets: [AIActionPreset] {
         let list = presets.filter { $0.isEnabled }
         return list.isEmpty ? [Self.defaultPresets[0]] : list
+    }
+
+    /// Reorders the preset list, moving `id` into `gapIndex` — the gap the insertion bar was
+    /// drawn in, counted between rows (0 = above the first, `count` = below the last), matching
+    /// the drop semantics of the Actions outline. The list order *is* the order everywhere — the
+    /// AI sub-bar, the search palette, and the Preferences list all read it — so persisting the
+    /// new array is the whole feature.
+    public func movePreset(id: String, toGap gapIndex: Int) {
+        let reordered = Self.reordering(presets, moving: id, toGap: gapIndex)
+        guard reordered.map(\.id) != presets.map(\.id) else { return }
+        presets = reordered
+    }
+
+    /// Pure reorder used by `movePreset`, split out so the ordering rules are testable without the
+    /// `@AppStorage`-backed singleton. Gap indices are pre-removal (SwiftUI's `move(fromOffsets:
+    /// toOffset:)` convention), so dropping into the gap directly below a row is a no-op rather
+    /// than an off-by-one. An unknown id or an out-of-range gap leaves the list intact — the gap
+    /// is clamped, never trapped on.
+    public static func reordering(_ presets: [AIActionPreset], moving id: String, toGap gapIndex: Int) -> [AIActionPreset] {
+        guard let sourceIndex = presets.firstIndex(where: { $0.id == id }) else { return presets }
+        var list = presets
+        list.move(fromOffsets: IndexSet(integer: sourceIndex), toOffset: max(0, min(gapIndex, presets.count)))
+        return list
+    }
+
+    /// Builds a user-authored preset with a fresh `custom_` id — the same shape the "Add Custom AI
+    /// Action" sheet writes, so it is deletable in AI → Actions like any other custom preset.
+    /// Pure, so the id/title/prompt rules are testable without the `@AppStorage` singleton.
+    public static func makeCustomPreset(title: String, prompt: String) -> AIActionPreset {
+        AIActionPreset(
+            id: "custom_\(UUID().uuidString.prefix(8))",
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            isEnabled: true
+        )
+    }
+
+    /// Appends a new custom preset and returns it. The preset list is the single source of truth
+    /// for every AI surface (palette, AI sub-bar, Preferences), so persisting it is the whole
+    /// registration — `AIActionSync` picks the change up through `aiActionPresetsDidChange`.
+    @discardableResult
+    public func addCustomPreset(title: String, prompt: String) -> AIActionPreset {
+        let preset = Self.makeCustomPreset(title: title, prompt: prompt)
+        updatePreset(preset)
+        return preset
+    }
+
+    /// The preset whose prompt is `prompt` (case- and whitespace-insensitive), if one exists — so
+    /// saving a prompt the user already saved reuses that tool instead of minting a duplicate.
+    public func preset(matchingPrompt prompt: String) -> AIActionPreset? {
+        Self.preset(in: presets, matchingPrompt: prompt)
+    }
+
+    /// Pure lookup behind `preset(matchingPrompt:)`.
+    public static func preset(in presets: [AIActionPreset], matchingPrompt prompt: String) -> AIActionPreset? {
+        let wanted = normalizedPrompt(prompt)
+        guard !wanted.isEmpty else { return nil }
+        return presets.first { normalizedPrompt($0.prompt) == wanted }
+    }
+
+    private static func normalizedPrompt(_ prompt: String) -> String {
+        prompt
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+            .lowercased()
     }
 
     public func updatePreset(_ updated: AIActionPreset) {
@@ -316,10 +311,55 @@ public final class AIServiceManager: ObservableObject {
         } else {
             self.cloudAPIKey = ""
         }
+
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "aiLocalURL") == nil,
+           let legacyURL = defaults.string(forKey: "aiOllamaURL"), !legacyURL.isEmpty {
+            localURL = legacyURL
+            localPresetRaw = LocalLLMPreset.ollama.rawValue
+        }
+        if defaults.object(forKey: "aiLocalModel") == nil,
+           let legacyModel = defaults.string(forKey: "aiOllamaModel"), !legacyModel.isEmpty {
+            localModel = legacyModel
+        }
+
+        Self.migrateForkCLIProvider(in: settingsStore)
+
+        if !AppleIntelligenceAvailability.isSupported && activeProviderRaw == "apple" {
+            activeProviderRaw = AIProviderType.local.rawValue
+        }
+    }
+
+    /// Fork builds up to 1.4.0 shipped their own `claudeCLI` / `codexCLI` providers. Map a stored
+    /// one onto upstream's `cli` provider with the matching preset, so the user keeps their CLI
+    /// instead of falling through to the default provider.
+    static func migrateForkCLIProvider(in store: SettingsStore) {
+        let preset: CLIPreset
+        switch store.get(.aiActiveProvider) {
+        case "claudeCLI": preset = .claude
+        case "codexCLI": preset = .codex
+        default: return
+        }
+        store.set(.aiActiveProvider, value: AIProviderType.cli.rawValue)
+        store.set(.aiCLIPreset, value: preset.rawValue)
+        store.set(.aiCLIModel, value: "default")
     }
 
     public var activeProviderType: AIProviderType {
-        get { AIProviderType(rawValue: activeProviderRaw) ?? .apple }
+        get {
+            switch activeProviderRaw {
+            case "apple":
+                return AppleIntelligenceAvailability.isSupported ? .apple : .local
+            case "local", "ollama":
+                return .local
+            case "cli":
+                return .cli
+            case "cloud":
+                return .cloud
+            default:
+                return AppleIntelligenceAvailability.isSupported ? .apple : .local
+            }
+        }
         set { activeProviderRaw = newValue.rawValue }
     }
 
@@ -333,20 +373,6 @@ public final class AIServiceManager: ObservableObject {
         }
     }
 
-    public var effectiveBrowserURLTemplate: String {
-        switch browserPreset {
-        case "claude": return "https://claude.ai/new?q={text}"
-        case "perplexity": return "https://www.perplexity.ai/search?q={text}"
-        case "gemini": return "https://gemini.google.com/app?q={text}"
-        case "deepseek": return "https://chat.deepseek.com/?q={text}"
-        case "custom":
-            let custom = browserURLTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-            return custom.isEmpty ? "https://chatgpt.com/?q={text}" : custom
-        default:
-            return "https://chatgpt.com/?q={text}"
-        }
-    }
-
     /// Overrides the AI provider instance (for testing/mocking).
     public var providerOverride: (any AIProvider)? = nil
 
@@ -357,22 +383,12 @@ public final class AIServiceManager: ObservableObject {
         switch activeProviderType {
         case .apple:
             return AppleIntelligenceProvider()
-        case .ollama:
-            return OllamaProvider(baseURL: ollamaURL, model: ollamaModel)
+        case .local:
+            return LocalLLMProvider(baseURL: localURL, model: effectiveLocalModel, disableThinking: localPreset.disablesThinking)
+        case .cli:
+            return CLIProvider(preset: cliPreset, customCommand: cliCustomCommand, modelOverride: effectiveCLIModel)
         case .cloud:
-            return CloudAPIProvider(apiKey: cloudAPIKey, model: cloudModel, serviceProvider: cloudServiceProvider, customBaseURL: cloudCustomURL)
-        case .browser:
-            return BrowserRedirectProvider(template: effectiveBrowserURLTemplate)
-        case .claudeCLI:
-            // The provider is handed the manager's cached resolver, not a path: this property
-            // rebuilds the provider on every access, so the cache has to outlive it.
-            return ClaudeCLIProvider(model: claudeCLIModel, resolveBinaryPath: {
-                try await self.resolvedClaudeBinaryPath()
-            })
-        case .codexCLI:
-            return CodexCLIProvider(model: codexModel, resolveBinaryPath: {
-                try await self.resolvedCodexBinaryPath()
-            })
+            return CloudAPIProvider(apiKey: cloudAPIKey, model: effectiveCloudModel, serviceProvider: cloudServiceProvider, customBaseURL: cloudCustomURL)
         }
     }
 }
@@ -400,14 +416,26 @@ public enum CloudServiceProvider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    public var primaryModel: String {
+        switch self {
+        case .openai: return "gpt-4o-mini"
+        case .anthropic: return "claude-3-7-sonnet-latest"
+        case .google: return "gemini-2.0-flash"
+        case .deepseek: return "deepseek-chat"
+        case .groq: return "llama-3.3-70b-versatile"
+        case .openrouter: return "openai/gpt-4o-mini"
+        case .custom: return "default"
+        }
+    }
+
     public var defaultModels: [String] {
         switch self {
-        case .openai: return ["gpt-4o-mini", "gpt-4o", "o1-mini", "o1", "gpt-4-turbo"]
-        case .anthropic: return ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"]
+        case .openai: return ["gpt-4o-mini", "gpt-4o", "o3-mini", "o1", "gpt-4-turbo"]
+        case .anthropic: return ["claude-3-7-sonnet-latest", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"]
         case .google: return ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
         case .deepseek: return ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"]
         case .groq: return ["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "deepseek-r1-distill-llama-70b"]
-        case .openrouter: return ["openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "deepseek/deepseek-r1", "google/gemini-2.0-flash-001"]
+        case .openrouter: return ["openai/gpt-4o-mini", "anthropic/claude-3.7-sonnet", "deepseek/deepseek-r1", "google/gemini-2.0-flash-001"]
         case .custom: return ["default"]
         }
     }

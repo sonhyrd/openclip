@@ -22,8 +22,15 @@ areas; stale debt notes are worse than none.
   `AIServiceManager.cloudAPIKey` is `@Published`, backed by `SecretStore` (account `aiCloudAPIKey`);
   do not convert it back to `@AppStorage`. A one-time migration reads the old `UserDefaults`
   `"aiCloudAPIKey"` key, then deletes it.
-- **`isAppEnabled` is consolidated** onto `SettingKey.isAppEnabled` — status bar, hotkey gate, and
-  the Preferences toggle all read/write through `DefaultSettingsStore`. Builtin store-backed actions
+- **`isAppEnabled` is consolidated** onto `SettingKey.isAppEnabled` — the status bar item and the
+  Preferences toggle read/write it through `DefaultSettingsStore`. It means **"Appear
+  Automatically"** (its label in both places): it owns the selection monitor's passive auto-show and
+  nothing else. It is applied in `MacSelectionMonitor.deliverSelection` (the mouse-release/keyboard
+  path) as the global form of the per-app `hotkeyOnly` rule; the explicit **Hold Mouse to Trigger**
+  gesture delivers from `handleMouseDown` and is exempt, so off + hold = hold-only mode. The ⌥⌘C
+  hotkey is an explicit request and is deliberately *not* gated on it.
+  `HotkeyManager.triggerAllowed` gates on the
+  real kill switches instead: Pause (`pauseUntilTimestamp`), app exclusion, per-app `disabled`. Builtin store-backed actions
   (`CalculateAction`, `CalendarAction`, `SearchAction`) accept an injected `SettingsStore` via
   `BuiltinRegistry.makeCoreBuiltins(settingsStore:)`.
 - **Menu bar visibility is store-backed and reversible.** `SettingKey.showMenuBarIcon` defaults to
@@ -44,37 +51,6 @@ areas; stale debt notes are worse than none.
   path already reads through the injected `optionStore` (`OpenClipJSHost` reads options read-only via
   `ActionOptionReading`); `AppleScriptAction` does not consume options today.
 
-## AI Providers (Claude Code CLI, Codex CLI)
-
-- **Resolved in 1.3.0: cancelling the popup now kills the `claude` child.** Upstream made
-  `ShellProcessRunner` consult task cancellation (`ProcessBox` +
-  `withTaskCancellationHandler`), and this fork's `runCapturingExit` is the same execution path,
-  so `ClaudeCLIProvider`'s task cancellation terminates the child's process group immediately
-  instead of leaving an orphan. The `Constants.scriptTimeout` watchdog (now **60 s**, upstream's
-  script budget) remains as the upper bound; this provider passes that shared constant rather
-  than a budget of its own. Either way the child writes no transcript
-  (`--no-session-persistence`).
-- **The Claude CLI resolution cache is deliberately not persisted.** `AIServiceManager`'s
-  `claudeBinaryPath` / `claudeResolutionDetail` are `@Published` runtime state, not settings — no
-  `@AppStorage`, no `SettingsStore`. A binary path goes stale across a CLI reinstall, a
-  version-manager switch or a home-directory move, and a persisted stale path fails at spawn with a
-  confusing error instead of simply being re-resolved. Cost: one login-shell spawn per app launch.
-  Do not "fix" this by persisting it.
-- **The Claude CLI provider is one-shot, not streaming.** `--output-format json` yields a single
-  envelope carrying the error flag and the usage data, so `processStream` yields the finished text
-  exactly once and finishes; the user sees a spinner rather than text arriving progressively. Every
-  other non-browser provider streams. Changing this means giving up the envelope (and with it the
-  `is_error` signal that classification depends on) for stream-json.
-- **The Codex CLI provider mirrors all three points above** (ADR 0002): `codexBinaryPath` /
-  `codexResolutionDetail` are runtime state, never persisted; `codexModels` (the `codex debug
-  models` listing) is cached per launch for the same reason; the provider is one-shot over `--json`
-  JSONL, yielding once. Codex has no tools-off flag, so the shell tool it always carries is bounded
-  by `-s read-only` and an empty private cwd rather than removed — a gap, named, not a fix waiting
-  to happen.
-- **The Claude CLI strings are translated into zh-Hans only.** The Codex strings and the changed
-  Claude rejection sentence carry all four languages; the rest of the Claude CLI copy from #7/#8
-  still lacks zh-Hant, fr and ja.
-
 ## Action Seams Already Implemented
 
 - **Coordinator composition is done.** `ActionCoordinator.loadInitialState()` wires `ExtensionManager`
@@ -89,17 +65,34 @@ areas; stale debt notes are worse than none.
   `NSAppleScript` in-process anymore. Since the hang fix, the watchdog is a **GCD timer** (immune
   to Swift-concurrency-pool starvation) and pipe output is read via GCD `readabilityHandler` (never
   a blocking `readToEnd()`, so a stuck child can't permanently consume a cooperative thread), with
-  stdin seeded and closed synchronously so a script reading stdin always sees EOF.
+  stdin seeded and closed synchronously so a script reading stdin always sees EOF. Both pipe
+  accumulators are drained **before** their buffers are read: `waitUntilExit()` returns when the
+  direct child exits, so the readability handler can still be behind, or not have run at all. The
+  drain is bounded — it waits `grace` (2 s) for EOF, reads what is pending, then closes the handle —
+  so it captures output that reached the pipe before that deadline. A descendant that writes after
+  the close still loses its output.
 - **Delivery is resolved by `ActionResultDelivery`, not per-runtime translation.** Runtimes
   (`OpenClipJSHost.run`, `ShellResultMapper`, kind actions) return only raw results; implicitly
   returned text (JS string return, AppleScript output, shell stdout, text snippets) is emitted as
   `.text` and the paste-vs-copy/preview delivery decision (Select → Probe → Toast) is applied
-  downstream from the user's per-click preference (General-tab `primaryClickBehavior`/
-  `secondaryClickBehavior`) plus the action's declared `Action.delivery` (snapshotted per perform),
-  the click intent, and the unified paste
-  availability. The old `after` translator (the pre-refactor `after` orchestration step and its
-  adapter) is **fully removed**. Async JS runs are guarded by the
-  `TimeoutFlag` watchdog (60 s, same pattern as `ShellProcessRunner`) and cooperative Swift task cancellation.
+  downstream from the action's author-declared output contract (`output` and `result` in manifest /
+  `ActionChrome`), optional user per-action delivery override (`ActionCustomizationManager`),
+  the universal secondary-click Clipboard Invariant (secondary click copies; or previews if primary is copy),
+  and the unified paste availability. The flawed global settings (`primaryClickBehavior`/
+  `secondaryClickBehavior`) are **fully removed**. The old `after` translator (the pre-refactor `after` orchestration step and its
+  adapter) is **fully removed**. Synchronous JavaScript (including the top-level synchronous phase
+  of async actions) is bounded by JavaScriptCore's VM execution-time limit, so a timeout unwinds
+  `evaluateScript` and releases its sync-evaluation gate slot. Idle promise waiting is bounded by
+  the `TimeoutFlag` watchdog (60 s by default), and Swift task cancellation remains cooperative.
+  A fetch response that arrives after the evaluation ends is discarded (`FetchTaskBox.isEnded`);
+  the host does not call the JavaScript VM for it (issue #40). Residual: retain cycles in
+  `JSNativeFetch` (`nativeFetchBlock` → `contextBox`/`context`; `jsonBlock` → `JSContextBox`) and
+  `PromiseState` (`JSValue?` → `JSValue.context`) keep the finished `JSContext` alive — this is
+  **line-cited analysis, not empirically probed**. `PolicySession` does not invalidate its
+  `URLSession`. A guarded `CFRunLoopPerformBlock` can still sit on the shared run loop and hold
+  those references. Do not break a cycle unless the final release of `JSValue`/`JSContext` is
+  guaranteed to land on the JS thread; otherwise an off-thread release becomes a memory-safety
+  hazard.
 - **Custom Action Groups use canonical IDs with dynamic materialization and strict $\ge 2$ member invariant.**
   User-defined action groups are defined via `ActionGroupDef` (`Sources/Core/Actions/ActionGroupDef.swift`),
   stored as JSON in `SettingKey.actionGroups`. Rather than rewriting action identifiers with virtual ID
@@ -119,8 +112,14 @@ areas; stale debt notes are worse than none.
 - **JS file scripts run in module mode (CommonJS).** A `javascript` action with `"script"` gets
   `require`/`module`/`exports`/`__dirname` and can split across local files; resolution is Node-style
   and contained to the package directory (`OpenClipModuleLoader` + `Constants.isPathSafe`), with
-  `../`/symlink escapes, absolute paths, and bare/Node-builtin specifiers rejected. Inline
-  `scriptCode` actions have no modules (byte-identical legacy behavior).
+  `../`/symlink escapes, absolute paths, and bare/Node-builtin specifiers rejected. Containment is
+  checked on the final symlink-resolved candidate, including the appended `.js` / `index.js`
+  (issue #39). Folder installs are **not** scanned for symlinks at install time — only `.zip`
+  entries are (`validateZipEntries`) — and `ExtensionPackageHashResolver` skips out-of-package
+  symlink targets from the trust hash, so the loader is the last line of defense for file reads.
+  Containment verification is bound directly to the open file descriptor via `fcntl(F_GETPATH)`
+  before reading, preventing check-then-read races. Inline `scriptCode` actions have no modules
+  (byte-identical legacy behavior).
 - **Third-party libraries live on the author side, not the host.** npm deps are bundled by the
   author with esbuild (`--platform=browser --target=es2020`) into `dist/main.js`; the host loader is
   **`.js`-only**, so TypeScript works only through the bundle path (`--with-npm` scaffold). Node
@@ -146,9 +145,11 @@ areas; stale debt notes are worse than none.
   `onPreferenceChange`/`onContentSizeChange` never fires for this and `sizingOptions` has no effect.
   The only reliable hook is `PopupPanel.setFrame` (`PopupPanel.swift:42`): when
   `pinBottomEdgeOnResize` is set it keeps the bottom edge fixed so results-above-the-field growth
-  never shoves the popup. The pin stays active through the search→bar collapse (Esc no longer jumps
-  the popup) and is cleared by `show(for:)` (`PopupWindowController.swift:69`) and `hide()`
-  (`:464`) before intentional placement.
+  never shoves the popup. For the search palette the pin is one-shot
+  (`releasesBottomPinAfterGrowth`): it covers the entry growth only, so the palette's height can
+  follow the result count without sliding the field; `exitSearch()` re-arms it for the search→bar
+  collapse after restoring the bar's bottom edge (Esc no longer jumps the popup). Both flags are
+  cleared by `show(for:)` and `hide()` before intentional placement.
 - **Search and content modes are the two key exceptions to the never-key rule.** `PopupPanel.allowsKey`
   enables `canBecomeKey`/`canBecomeMain` in both modes (`PopupPanel.swift:19`), routed through the
   same `enterKeyMode()`/`exitKeyMode()` primitives (`PopupWindowController.swift:196,206`). A
@@ -182,19 +183,59 @@ areas; stale debt notes are worse than none.
 - **Popup sizing constants live in the App target.** `PopupMetrics`
   (`Sources/OpenClip/UI/Popup/PopupMetrics.swift`) holds the UI-only values — `searchMaxRows`
   (5), `searchResultRowHeight` (32), `searchPeekRowFraction` (0.5), `popupMaxHeight` (300, the
-  shared height cap for the popup panel), the AI card bounds (`aiCardMinWidth` 220 /
-  `aiCardIdealWidth` 300 / `aiCardMaxWidth` 360 / `aiCardBodyHeight` 160), plus
-  placement/dismissal distances. `Core/Selection/Constants.swift` keeps only
+  shared height cap for the popup panel — lifted per-session via `PopupPanel.heightCap` while the
+  result card shows, since a user-resized card may be taller), the AI card bounds
+  (`aiCardMinWidth` 220 / `aiCardIdealWidth` 320 / `aiCardMaxWidth` 360 / `aiCardMinHeight` 200 /
+  `aiCardMaxHeight` 280 — the max bounds only cap the content-driven default; the card's and the
+  palette's resize handles go up to the screen, see `PopupResizeGeometry`, with the palette's own
+  floor `searchPaletteMinWidth` 240 / `searchPaletteMinHeight` 128), plus placement/dismissal
+  distances. The remembered card and palette sizes are the popup preferences declared in the App
+  target (`SettingKey+ResultCard.swift`, `SettingKey+SearchPalette.swift`, next to
+  `SettingKey+MenuBar.swift`) because they are pure presentation. `Core/Selection/Constants.swift` keeps only
   domain/runtime constants (timeouts, key codes, env vars, manifest keys).
+
+## AI Providers
+
+- **Apple Intelligence is gated by one availability source.** `AppleIntelligenceAvailability`
+  (`Sources/OpenClip/AI/AppleIntelligenceAvailability.swift`) folds the `#available(macOS 26.0, *)`
+  floor together with `SystemLanguageModel.default.availability` (`deviceNotEligible`,
+  `appleIntelligenceNotEnabled`, `modelNotReady`) into one `Status`, and owns the copy for each. The
+  Preferences status row (`AIConfigureForm`) and the provider's runtime errors both read it, so they
+  can't disagree about *why* the feature is off. The Apple picker segment is still selectable on
+  unsupported machines — it explains rather than disables.
+- **The Apple provider uses guided generation, not tag scraping.** `AppleIntelligenceResponse`
+  (`@Generable`, in `AppleIntelligenceProvider.swift`) declares `result`/`title`, so the framework
+  constrains the model's output; the provider re-emits those fields via
+  `AIRequestSupport.taggedResponse` into the `<result>`/`<title>` contract that the palette, result
+  card, and save-as-tool flows already parse. `systemPrompt(structuredResult:)` swaps the tag
+  instructions for schema-field wording, because asking for tags would make the model embed them
+  inside the fields; `taggedResponse` additionally runs values through `stripTagMarkup` for the same
+  reason, since the palette's text-shaped prompts still say "inside <title> tags".
+- **One name per response.** `<title>` carries the short name for the work — a task heading for the
+  answer card, or a reusable action name when saving a palette instruction as an AI tool. Which
+  style to produce is the flow's business and lives only in the prompt wording
+  (`PaletteAIPrompt.saveToolTaskPrompt`); one generated name serves both the preset title and the
+  card heading in the save flow.
+- **`tokenCount` is only used as a pre-flight guard.** The provider counts tokens (macOS 26.4+) and
+  compares against `contextSize` only when the input exceeds `tokenBudgetCheckThreshold` (2000
+  chars), throwing `requestTooLarge` before paying for a doomed generation. Oversized selections are
+  **not** auto-routed to another provider.
+- **macOS 27 APIs are not yet adopted.** `PrivateCloudComputeLanguageModel`, the new `LanguageModel`
+  protocol, and the Vision-backed tools (OCRTool/BarcodeReaderTool) are macOS 27 / Xcode 27 only and
+  are absent from the 26.5 SDK this repo builds against, so they cannot be referenced at all
+  (`#if canImport(FoundationModels)` is already true on 26.x, so a symbol reference breaks the
+  build rather than failing at runtime). Adding Private Cloud Compute and the model-abstraction
+  refactor is deferred until the toolchain is upgraded.
 
 ## Unused / Latent
 
 - **`ActionContext.modifiers` is currently unused.** No action reads it; `PopupWindowController`
   passes `modifiers: []`. The click intent itself *is* plumbed: `ActionContext.isSecondaryClick` is
   set from
-  the captured `pendingClickIntent` by the bar/palette perform paths (right-click always; ⇧-click
-  via the `onClickIntent` closure) and read by `DefineAction` to copy a definition headlessly. True
-  modifier keys (⌘/⌥) still don't reach actions.
+  the run's resolved intent by the bar/sub-bar/palette perform paths (right-click or ⇧-click via
+  the bar/sub-bar mouse intent; ⇧⏎ and the ⇧⏎ footer badge via the palette's own `replace` flag,
+  passed explicitly through `onWillPerformAction`/`onRunLoadingAction`) and read by `DefineAction`
+  to copy a definition headlessly. True modifier keys (⌘/⌥) still don't reach actions.
 - **Paste delivery is now standardized but has a probe reliance.** Leaf `.paste` results are
   re-decided by `ActionResultDelivery` (App target) per the rule in the dev-guide §5b: a secondary
   click uses the declared `secondary` outcome (else derives `.copy` from a `.paste` primary), and
@@ -213,8 +254,11 @@ areas; stale debt notes are worse than none.
   probe is started by the trigger sites in parallel with selection retrieval and applied before the
   first frame (probe-before-render, nothing cached), so a same-app focus-context change re-probes
   cleanly. The click-intent capture reads
-  only ⇧ (not ⌘/⌥) and only sets it on mouse-down; a keyboard-driven run (search palette Enter) uses
-  the last left-click intent. Since Task 4, each action's declared `Action.delivery` (a distinct
+  only ⇧ (not ⌘/⌥); the bar/sub-bar take it from mouse-down, while the palette resolves it itself
+  (`replace` for ⇧⏎ / the ⇧⏎ badge, else the captured mouse intent) and passes it explicitly into
+  the delivery snapshot, and entering the palette resets `pendingClickIntent` so a keyboard run
+  never inherits the right-click that opened a group's scoped palette. Since Task 4, each action's
+  declared `Action.delivery` (a distinct
   secondary outcome + per-click `primaryToast`/`secondaryToast`) is snapshotted alongside the click
   intent and fed into `resolve`, and the returned tuple's toast is rendered directly — the manual
   `isDowngradedToCopy`/`isCopyDefinition` inline toast detection was removed in favor of the resolved
@@ -227,13 +271,14 @@ areas; stale debt notes are worse than none.
   so a prior non-dismissing action's declared delivery can never leak onto a completion paste. The
   force-copy probe short-circuit skips the AX walk for a secondary click whose outcome is a copy;
   a declared `.paste` secondary is the exception and still probes, so it is honored when the target
-  can paste (and downgrades to copy when it cannot). Since Task 3, implicitly returned text
-  (runtimes emit `.text`, never auto-dismissing) is resolved per the user's per-click preference
-  from the two General-tab settings (`preference(for:)`, unknown values fall back to primary-paste/
-  secondary-copy): a paste preference probes like any paste and downgrades to copy when the target
-  can't paste, a copy preference delivers a native copy with no toast, and a preview preference keeps
-  the popup open for the card render (Task 4) — dismissal for `.text` is decided by the controller's
-  `shouldDismiss`, not `dismissesPopup`. The loading re-show path (`settleLoadingResult`)
+  can paste (and downgrades to copy when it cannot). Implicitly returned text
+  (runtimes emit `.text`, never auto-dismissing) is resolved by `ActionResultDelivery.resolve`
+  using the action's author output contract (`output` and `result` in manifest / `ActionChrome`),
+  optional user per-action delivery override (`ActionCustomizationManager`), the universal secondary-click
+  Clipboard Invariant, and unified AX paste availability: a paste outcome probes like any paste
+  and downgrades to copy when the target can't paste, a copy outcome delivers a native copy with no toast,
+  and a preview outcome keeps the popup open for the card render — dismissal for `.text` is decided by
+  the controller's `shouldDismiss`, not `dismissesPopup`. The loading re-show path (`settleLoadingResult`)
   re-creates the popup from the pre-early-close selection snapshot to present the card.
   - **Target application and delivery context snapshotted before perform.** Asynchronous actions snapshot
     the target application, app policy, and declared delivery into an `inFlightDeliveryContext` (or local task
@@ -256,15 +301,20 @@ areas; stale debt notes are worse than none.
 
 - **Residual non-interruptible paths (documented).** Two spots remain that a hostile
   or hung target can make block a background thread:
-  (1) `SelectionRetrievalCoordinator.pressEditCopyMenu` fires an AXPress on the dedicated
-  `com.openclip.ax-inspect` queue that the `pasteboardCopyTimeout` poll does not kill — the press
-  is uncancellable and may pin a queue worker thread against a hung target until the AX call
-  returns (never bounded by the copy timeout). The queue is concurrent, so a stuck press no longer
-  head-of-line-blocks later retrieval requests (see below);
-  (2) an async-mode
-  JS script with a top-level *synchronous* infinite loop blocks inside `evaluateScript`, which the
-  watchdog pump loop never reaches (the sync-evaluation gate covers only `isAsync == false`).
-  Neither path is main-actor-blocking.
+  (1) `SelectionRetrievalCoordinator.pressEditCopyMenu` starts an AXPress on the dedicated
+  `com.openclip.ax-inspect` queue. The `pasteboardCopyTimeout` poll does not stop that press.
+  A blocked target can occupy one queue worker until AX returns or
+  `AXUIElementSetMessagingTimeout` (`Constants.axReadTimeout`) ends the call.
+  The `inspectGate` permit is not held for that duration.
+  `pressCopyMenuWithWatchdog` releases the permit at the first of {press returned, `axReadTimeout`},
+  same OnceResume race as inspect. The queue is concurrent, so a blocked press does not delay
+  later retrieval requests (see below);
+  (2) `PasteAvailabilityProbe.editPasteEnabled` walks the menu bar up to an aggregate deadline
+  passed through `AXMenuNavigator.findMenuItem`. Each AX message also has a per-call limit of
+  `axReadTimeout`. An abandoned walk stops at `pasteProbeTimeout` (or upon completing an in-flight message),
+  so workers do not linger for minutes on the queue. The counting gate releases its permit at the deadline
+  (issue #37) so subsequent probes are never delayed.
+  These paths do not block the main actor.
 - **AX inspect is deadline-capped.** `SelectionRetrievalCoordinator.inspectWithWatchdog` races
   `AXElementInspector.inspect` against
   `Constants.axReadTimeout` (0.5 s) via the `OnceResume` once-gate, running the blocking snapshot on
@@ -276,22 +326,31 @@ areas; stale debt notes are worse than none.
   process-wide for seconds. Reads now go through a counting gate (`Constants.axMaxConcurrentInspects`,
   currently 4): concurrent reads proceed in parallel, the permit frees when the caller's watchdog
   settles (deadline or completion), and only genuinely saturated bursts skip. Menu-copy presses
-  share the same gate for serialization.
+  share the same gate. The permit is released at `axReadTimeout`, same as inspect.
 - **The `ax-inspect` queue is concurrent, not head-of-line blocking.** All blocking AX work in the
   coordinator (the inspect snapshot and the Edit ▸ Copy AXPress) shares one concurrent
   `com.openclip.ax-inspect` queue: a hung AX call occupies one worker thread but later inspect
   snapshots and presses start on other threads, so a slow or stuck target no longer delays the next
   request's start. Each request still gets its own `axReadTimeout` deadline race.
-  (`PasteAvailabilityProbe` deliberately keeps its own `ax-probe` queue plus a
-  probe-slot gate so a stalled probe never spawns extra blocked workers.)
+  `PasteAvailabilityProbe` uses the same design (issue #37): a concurrent
+  `com.openclip.ax-probe` queue and a counting gate (`Constants.pasteProbeMaxConcurrent`, 4).
+  The side that ends the wait releases the permit at `pasteProbeTimeout`.
+  The old `probeSlot` stayed occupied until the blocked AX walk returned.
+  That stopped every later probe and changed all paste operations to copy.
 - **Subprocess pipe reads are non-blocking (hang fix).** `ShellProcessRunner` previously read stdout/
   stderr with blocking `readToEnd()` tasks and a `Task.sleep` watchdog — both can be starved, so a
   child (or grandchild) holding a pipe open could wedge the cooperative pool and hang the test
   suite indefinitely (observed mid-suite in `ScriptActionTests.testScriptExecution`). The runner now
   uses a GCD timer watchdog + GCD `readabilityHandler` reads + synchronous stdin close. This claim
   covers only the pipe reads: `process.waitUntilExit()` still blocks its detached thread until the
-  child exits — bounded at `Constants.scriptTimeout`, when the watchdog kills the child and the wait
-  returns.
+  child exits — bounded at `Constants.scriptTimeout`. At timeout the watchdog starts descendant
+  cleanup (the child, the process group when the child is the leader, and remaining descendants).
+  `waitUntilExit()` waits only for the direct child; descendant SIGKILL is scheduled asynchronously
+  and may finish after the wait returns. Descendants come from a `proc_listchildpids` walk of the
+  child's own subtree (not a scan of the whole process table), snapshotted with start times before
+  `terminate()`. Two limits remain: a probe that reports 0 children is still read once, because a
+  spurious 0 would silently drop a descendant; and a grandchild that reparented to launchd before
+  the snapshot is unreachable by any pid walk.
 
 ## Selection Retrieval
 
@@ -339,15 +398,16 @@ areas; stale debt notes are worse than none.
   `ActionCustomizationTests`. Prefer it (or `DefaultSettingsStore(userDefaults: suiteName)`) over
   writing the real preferences domain.
 - **Isolated in-memory test doubles and seams.** Store-backed tests use `MemorySettingsStore`
-  rather than writing the real preferences domain, `SecretActionOptionStoreTests` redirects to a
-  temporary file (`SecretStore.setFileURLForTesting`), and `TextRetrieverTests` injects a stub coordinator,
+  rather than writing the real preferences domain, and `SecretActionOptionStoreTests` redirects to a
+  temporary file (`SecretStore.setFileURLForTesting`),
   eliminating live system pasteboard/keychain mutation during test runs.
 - **Removed slow/flaky/environment-dependent tests:** the Apple Intelligence live-model test
   (`testAppleIntelligenceMatchesPresetPrompts`) made
   real on-device `LanguageModelSession` calls; `DebugLogEndToEndTests` polled `OSLogStore`
-  with multi-second sleeps; and `ScriptActionTests` duplicated `ScriptActionExecutionTests` (its
-  stdin-reading test was the observed hang point). Core validation tests for those paths remain
-  (pure validation, no live model/activation).
+  with multi-second sleeps; `ScriptActionTests` duplicated `ScriptActionExecutionTests`; and
+  interactive popup panel/toast/search UI tests requiring live window-server positioning were
+  trimmed to optimize test execution speed and keep the unit test suite fast and deterministic.
+  Core domain logic, validation, action execution, and isolation tests remain fully covered.
 
 ## Logging
 
@@ -358,3 +418,5 @@ areas; stale debt notes are worse than none.
 - **Level budget is conservative.** Most messages are `.notice`/`.error`; `.debug` is used for
   defensive parses and transient network hiccups (filtered out by default in Console).
 - **`chrome` category is reserved but unused** — no popup-window-chrome code logs yet.
+- **`RotatingFileLogSink` keeps all non-`Sendable` state on its serial queue**, including
+  its `DateFormatter`; its `@unchecked Sendable` depends on that rule (#45).

@@ -14,7 +14,7 @@ public struct CustomActionManifestWriter: Sendable {
     public static func metadata(for action: CustomAction) -> ExtensionMetadata {
         let actionMeta: ExtensionActionMetadata
         switch action.type {
-        case .webSearch(let urlTemplate):
+        case .openURL(let urlTemplate):
             actionMeta = ExtensionActionMetadata(
                 id: action.id,
                 title: action.title,
@@ -37,6 +37,15 @@ public struct CustomActionManifestWriter: Sendable {
                 icon: action.iconName,
                 type: "shell",
                 scriptCode: script
+            )
+        case .javaScript(let script, let isAsync, _):
+            actionMeta = ExtensionActionMetadata(
+                id: action.id,
+                title: action.title,
+                icon: action.iconName,
+                type: "javascript",
+                scriptCode: script,
+                isAsync: isAsync
             )
         }
         return ExtensionMetadata(

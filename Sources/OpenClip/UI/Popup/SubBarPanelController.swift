@@ -20,9 +20,16 @@ public final class SubBarPanelController {
     public var panelFrame: NSRect { panel.frame }
     /// Called when the sub-bar hides so parent state (like active button highlight) is dismissed immediately.
     public var onDismiss: (@MainActor @Sendable () -> Void)?
+    /// The screen-space hover-tooltip surface shared with PopupWindowController. Injected for tests.
+    public let tooltipController: TooltipPanelController
+    /// The main bar panel's screen frame for the current show, used as the tooltip avoidance rect
+    /// so a sub-bar tooltip flips away from the main bar instead of overlapping it.
+    private var mainBarScreenFrame: NSRect?
 
-    public init(panel: SubBarPanel = SubBarPanel()) {
+    public init(panel: SubBarPanel = SubBarPanel(),
+                tooltipController: TooltipPanelController = .shared) {
         self.panel = panel
+        self.tooltipController = tooltipController
     }
 
     @discardableResult
@@ -40,10 +47,11 @@ public final class SubBarPanelController {
         scale: CGFloat,
         context: ActionContext,
         presenter: any ActionPresenting,
+        modeStore: PopupModeStore = PopupModeStore(),
         onResult: @escaping @MainActor @Sendable (ActionResult) -> Void,
         onRunAI: @escaping @MainActor @Sendable (String) -> Void,
-        onRunLoadingAction: @escaping @MainActor @Sendable (any Action) -> Void,
-        onWillPerformAction: @escaping @MainActor @Sendable (any Action) -> Void,
+        onRunLoadingAction: @escaping @MainActor @Sendable (any Action, ActionResultDelivery.ClickIntent) -> Void,
+        onWillPerformAction: @escaping @MainActor @Sendable (any Action, ActionResultDelivery.ClickIntent) -> Void,
         onActionPerformed: @escaping @MainActor @Sendable (String) -> Void,
         onClickIntent: @escaping @MainActor @Sendable () -> ActionResultDelivery.ClickIntent
     ) -> Bool {
@@ -64,6 +72,7 @@ public final class SubBarPanelController {
             parentButtonFrame: parentButtonScreenFrame
         )
         self.activeState = state
+        self.mainBarScreenFrame = mainBarScreenFrame
         panel.horizontalAnchor = .none
 
         let contentView = SubBarContentView(
@@ -73,6 +82,7 @@ public final class SubBarPanelController {
             scale: scale,
             context: context,
             presenter: presenter,
+            modeStore: modeStore,
             onResult: onResult,
             onRunAI: onRunAI,
             onRunLoadingAction: onRunLoadingAction,
@@ -89,11 +99,21 @@ public final class SubBarPanelController {
             },
             onPaginationAnchor: { [weak self] anchor in
                 self?.panel.horizontalAnchor = anchor
+            },
+            onContentSizeChange: { [weak self] size in
+                self?.resizePanel(to: size)
+            },
+            onShowTooltip: { [weak self] text, localFrame, theme, isDark in
+                self?.presentTooltip(text: text, localFrame: localFrame, effectiveTheme: theme, isDark: isDark)
+            },
+            onHideTooltip: { [weak self] in
+                self?.tooltipController.hide()
             }
         )
 
         let hosting = SubBarPanel.ContentView(rootView: AnyView(contentView))
         self.hostingView = hosting
+        panel.appearance = NSAppearance(named: effectiveColorScheme == .dark ? .darkAqua : .aqua)
         panel.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
 
@@ -161,6 +181,29 @@ public final class SubBarPanelController {
         panel.setFrame(NSRect(x: clampedX, y: panelY, width: panelWidth, height: panelHeight), display: true)
         panel.orderFront(nil)
         return panelY == yAbove
+    }
+
+    /// Presents a sub-bar button's hover tooltip in the screen-space tooltip window, avoiding the
+    /// main bar's frame so the tooltip flips below the sub-bar instead of overlapping the main bar
+    /// (or being clamped on top of the sub-bar's own buttons, the old in-panel behavior).
+    private func presentTooltip(text: String, localFrame: CGRect, effectiveTheme: String, isDark: Bool) {
+        guard panel.isVisible, let contentView = panel.contentView else { return }
+        let viewRect = NSRect(x: localFrame.minX, y: localFrame.minY, width: localFrame.width, height: localFrame.height)
+        let windowRect = contentView.convert(viewRect, to: nil)
+        let targetScreenFrame = panel.convertToScreen(windowRect)
+        guard !targetScreenFrame.isEmpty else { return }
+        var avoidanceRects: [CGRect] = []
+        if let mainBarScreenFrame, mainBarScreenFrame.width > 0, mainBarScreenFrame.height > 0 {
+            avoidanceRects.append(mainBarScreenFrame)
+        }
+        tooltipController.show(
+            text: text,
+            targetScreenFrame: targetScreenFrame,
+            avoidanceRects: avoidanceRects,
+            effectiveTheme: effectiveTheme,
+            isDark: isDark,
+            maxWidth: panel.frame.width - 32
+        )
     }
 
     /// Pin the current active sub-bar so it stays open until explicitly closed or an action runs.
@@ -236,6 +279,7 @@ public final class SubBarPanelController {
         cancelGrace()
         guard isShowing || activeState != nil else { return }
         activeState = nil
+        mainBarScreenFrame = nil
         SubBarHoverState.shared.location = nil
         panel.horizontalAnchor = .none
         panel.ignoresMouseEvents = false
@@ -256,6 +300,44 @@ public final class SubBarPanelController {
         }
         return contentView.bounds.contains(contentPoint)
     }
+
+    /// Resizes the sub-bar panel to match content size changes (e.g. pagination) while respecting
+    /// horizontal anchoring (such as keeping the right edge fixed when clicking pagination chevrons).
+    public func resizePanel(to proposedSize: CGSize, mouseLocation: CGPoint? = nil) {
+        guard panel.isVisible else { return }
+        let newWidth = max(proposedSize.width, PopupMetrics.actionButtonWidth)
+        let newHeight = max(proposedSize.height, 30)
+        let currentFrame = panel.frame
+        guard abs(newWidth - currentFrame.width) > 0.5 || abs(newHeight - currentFrame.height) > 0.5 else { return }
+        let newFrame = NSRect(x: currentFrame.origin.x, y: currentFrame.origin.y, width: newWidth, height: newHeight)
+        panel.setFrame(newFrame, display: true)
+        updateHoverLocation(at: mouseLocation)
+    }
+
+    /// Updates the sub-bar hover coordinate in SubBarHoverState to reflect the current mouse position
+    /// within the resized or moved sub-bar window.
+    public func updateHoverLocation(at screenLocation: CGPoint? = nil) {
+        guard panel.isVisible, let contentView = panel.contentView else {
+            SubBarHoverState.shared.location = nil
+            return
+        }
+        let mouseLoc = screenLocation ?? NSEvent.mouseLocation
+        let overContent = isOverContent(mouseLoc)
+        if SubBarHoverState.shared.usesGlobalMouseMonitoring {
+            panel.ignoresMouseEvents = !overContent
+        }
+        let windowPoint = panel.convertPoint(fromScreen: mouseLoc)
+        let contentPoint = contentView.convert(windowPoint, from: nil)
+        if contentView.bounds.contains(contentPoint) {
+            let y = contentView.isFlipped ? contentPoint.y : contentView.bounds.height - contentPoint.y
+            let point = CGPoint(x: contentPoint.x, y: y)
+            if point != SubBarHoverState.shared.location {
+                SubBarHoverState.shared.location = point
+            }
+        } else {
+            SubBarHoverState.shared.location = nil
+        }
+    }
 }
 
 /// The inner content view rendered in SubBarPanel.
@@ -266,21 +348,26 @@ private struct SubBarContentView: View {
     let scale: CGFloat
     let context: ActionContext
     let presenter: any ActionPresenting
+    let modeStore: PopupModeStore
     let onResult: @MainActor @Sendable (ActionResult) -> Void
     let onRunAI: @MainActor @Sendable (String) -> Void
-    let onRunLoadingAction: @MainActor @Sendable (any Action) -> Void
-    let onWillPerformAction: @MainActor @Sendable (any Action) -> Void
+    let onRunLoadingAction: @MainActor @Sendable (any Action, ActionResultDelivery.ClickIntent) -> Void
+    let onWillPerformAction: @MainActor @Sendable (any Action, ActionResultDelivery.ClickIntent) -> Void
     let onActionPerformed: @MainActor @Sendable (String) -> Void
     let onClickIntent: @MainActor @Sendable () -> ActionResultDelivery.ClickIntent
     let onHoverChange: @MainActor @Sendable (Bool) -> Void
     let onPaginationAnchor: (@MainActor (PopupPanel.HorizontalAnchor) -> Void)?
+    let onContentSizeChange: (@MainActor (CGSize) -> Void)?
+    /// Shows the hover tooltip for a sub-bar button in the controller's screen-space tooltip
+    /// window: (text, button frame in popupHoverSpace, effective theme token, isDark).
+    let onShowTooltip: @MainActor (String, CGRect, String, Bool) -> Void
+    /// Hides the screen-space hover tooltip.
+    let onHideTooltip: @MainActor () -> Void
 
     @State private var currentPage: Int = 0
     private let hoverState: SubBarHoverState = .shared
     @State private var hoveredTarget: PopupHoverTarget? = nil
-    @State private var activeTooltip: (text: String, frame: CGRect)? = nil
-    @State private var isTooltipHot: Bool = false
-    @State private var tooltipTask: Task<Void, Never>? = nil
+    @State private var tooltipPresenter = TooltipPresenter()
     @State private var hoverFrames: [PopupHoverTarget: CGRect] = [:]
 
     private var cornerRadius: CGFloat { PopupMetrics.popupCornerRadius * scale }
@@ -290,6 +377,7 @@ private struct SubBarContentView: View {
             subActions: subActions,
             currentPage: $currentPage,
             hoverState: hoverState,
+            modeStore: modeStore,
             onResult: onResult,
             onRunAI: onRunAI,
             onRunLoadingAction: onRunLoadingAction,
@@ -311,57 +399,46 @@ private struct SubBarContentView: View {
             scale: scale
         )
 
-        let styledSubBar = Group {
-            if effectiveTheme == "glass" {
-                subBar
-                    .layeredGlassSurface(cornerRadius: cornerRadius, colorScheme: effectiveColorScheme)
-            } else {
-                subBar
-                    .background(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(effectiveTheme == "dark" ? Color(red: 0.20, green: 0.20, blue: 0.22) : Color(red: 0.91, green: 0.91, blue: 0.93))
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .stroke(effectiveTheme == "light" ? Color.black.opacity(0.20) : Color.white.opacity(0.22), lineWidth: 1.0)
-                    )
-                    .shadow(color: Color.black.opacity(effectiveTheme == "light" ? 0.16 : 0.32), radius: 6, x: 0, y: 3)
-            }
-        }
+        let styledSubBar = subBar
+            .popupCardChrome(
+                cornerRadius: cornerRadius,
+                effectiveTheme: effectiveTheme,
+                colorScheme: effectiveColorScheme
+            )
 
         styledSubBar
             .environment(\.colorScheme, effectiveColorScheme)
             .environment(\.popupEffectiveTheme, effectiveTheme)
             .padding(PopupMetrics.popupShadowInset)
-        .coordinateSpace(name: "popupHoverSpace")
-        .onPreferenceChange(PopupHoverFramePreferenceKey.self) { frames in
-            hoverFrames = frames
-            updateHoveredTarget(for: hoverState.location)
-        }
-        .onReceive(hoverState.$location) { location in
-            updateHoveredTarget(for: location)
-        }
-        .overlay(alignment: .topLeading) {
-            GeometryReader { geo in
-                if let tooltip = activeTooltip {
-                    PopupTooltipContainer(
-                        text: tooltip.text,
-                        targetFrame: tooltip.frame,
-                        containerWidth: geo.size.width,
-                        effectiveTheme: effectiveTheme,
-                        isDark: effectiveColorScheme == .dark
-                    )
+            .coordinateSpace(name: "popupHoverSpace")
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: PopupContentSizePreferenceKey.self, value: proxy.size)
+                }
+            )
+            .onPreferenceChange(PopupHoverFramePreferenceKey.self) { frames in
+                hoverFrames = frames
+                updateHoveredTarget(for: hoverState.location)
+            }
+            .onPreferenceChange(PopupContentSizePreferenceKey.self) { size in
+                MainActor.assumeIsolated {
+                    guard size.width > 0, size.height > 0 else { return }
+                    onContentSizeChange?(size)
                 }
             }
-            .allowsHitTesting(false)
-        }
+            .onReceive(hoverState.$location) { location in
+                updateHoveredTarget(for: location)
+            }
         .contentShape(Rectangle())
         .onHover { isHovering in
             onHoverChange(isHovering)
         }
         .onChange(of: hoveredTarget) { _, newTarget in
             updateTooltip(for: newTarget)
+        }
+        .onDisappear {
+            tooltipPresenter.reset { onHideTooltip() }
         }
     }
 
@@ -374,48 +451,33 @@ private struct SubBarContentView: View {
     }
 
     private func updateTooltip(for target: PopupHoverTarget?) {
-        tooltipTask?.cancel()
-        guard let target, let frame = hoverFrames[target] else {
-            withAnimation(.easeOut(duration: 0.1)) {
-                activeTooltip = nil
-            }
-            tooltipTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                guard !Task.isCancelled else { return }
-                isTooltipHot = false
-            }
-            return
-        }
-
-        let text: String? = {
-            switch target {
-            case .subAction(let index):
-                guard index < subActions.count else { return nil }
-                return subActions[index].displayTitle(using: presenter)
-            case .chevron("chevron.left.sub"):
-                return String(localized: "Previous page")
-            case .chevron("chevron.right.sub"):
-                return String(localized: "Next page")
-            default:
-                return nil
-            }
-        }()
-
-        guard let text else { return }
-
-        if isTooltipHot {
-            withAnimation(.easeInOut(duration: 0.1)) {
-                activeTooltip = (text: text, frame: frame)
-            }
-        } else {
-            tooltipTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                guard !Task.isCancelled else { return }
-                isTooltipHot = true
-                withAnimation(.easeOut(duration: 0.15)) {
-                    activeTooltip = (text: text, frame: frame)
+        let resolved: (text: String, frame: CGRect)? = {
+            guard let target, let frame = hoverFrames[target] else { return nil }
+            let text: String? = {
+                switch target {
+                case .subAction(let index):
+                    guard index < subActions.count else { return nil }
+                    return subActions[index].displayTitle(using: presenter)
+                case .chevron("chevron.left.sub"):
+                    return String(localized: "Previous page")
+                case .chevron("chevron.right.sub"):
+                    return String(localized: "Next page")
+                default:
+                    return nil
                 }
+            }()
+            guard let text else { return nil }
+            return (text, frame)
+        }()
+        tooltipPresenter.update(
+            text: resolved?.text,
+            show: { [onShowTooltip, effectiveTheme, isDark = effectiveColorScheme == .dark] in
+                guard let resolved else { return }
+                onShowTooltip(resolved.text, resolved.frame, effectiveTheme, isDark)
+            },
+            hide: { [onHideTooltip] in
+                onHideTooltip()
             }
-        }
+        )
     }
 }

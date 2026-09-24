@@ -3,7 +3,8 @@
 //
 // Provides reusable SwiftUI form controls for customizing action titles, icon symbols, and display modes.
 // Follows Approach 2 (Hero Header / Shortcuts style): prominent 48x48 hero icon button on the left,
-// action name TextField and [Show Icon | Show Text] segmented control on the right.
+// action name TextField and [Show Icon | Show Text] segmented control on the right. The hero button
+// asks the router for the icon chooser page (see `IconPickerPage`) instead of floating a popover.
 import SwiftUI
 import Core
 
@@ -21,44 +22,55 @@ struct ActionAppearanceFields: View {
     /// replacement; nil when the baseline is already fully described by `iconSymbol`.
     let baseIcon: ActionIcon?
     @Binding var displayMode: Int // 0 = Show Icon, 1 = Show Text
+    /// Symbol Show Icon mode resolves to for text-glyph builtins (Copy/Cut/Paste) while no
+    /// replacement has been picked; nil for actions whose icon is already symbol-representable.
+    var textGlyphFallbackSymbol: String? = nil
+    /// Optional callback when the icon chooser opens.
+    var onPickIcon: (() -> Void)? = nil
 
-    @State private var showingIconPicker = false
+    @State private var isIconPickerPresented = false
     @State private var isIconHovered = false
 
     /// What the icon preview should render right now (same resolution the popup bar applies).
     private var previewIcon: ActionIcon {
         Self.resolvedPreviewIcon(
-            displayMode: displayMode,
+            displayMode: 0,
             title: title,
             displayTextFallback: displayTextFallback,
             iconSymbol: iconSymbol,
             initialIconSymbol: initialIconSymbol,
-            baseIcon: baseIcon
+            baseIcon: baseIcon,
+            textGlyphFallbackSymbol: textGlyphFallbackSymbol
         )
     }
 
     /// Preview resolution, mirroring `ActionCustomizationManager.popupIcon`: Show-Text mode swaps the
     /// icon slot for the effective display text (custom title, else the native one); Show-Icon mode
-    /// keeps the real icon until a genuinely user-picked replacement symbol exists.
+    /// keeps the real icon until a genuinely user-picked replacement symbol exists, falling back to
+    /// `textGlyphFallbackSymbol` for text-glyph builtins.
     static func resolvedPreviewIcon(
         displayMode: Int,
         title: String,
         displayTextFallback: String,
         iconSymbol: String,
         initialIconSymbol: String,
-        baseIcon: ActionIcon?
+        baseIcon: ActionIcon?,
+        textGlyphFallbackSymbol: String? = nil
     ) -> ActionIcon {
         if displayMode == 1 {
             let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
             return .text(trimmed.isEmpty ? displayTextFallback : trimmed)
         }
         if iconSymbol.isEmpty {
+            if case .text? = baseIcon, let fallback = textGlyphFallbackSymbol {
+                return .symbol(fallback)
+            }
             return baseIcon ?? .symbol(Constants.defaultIconSymbol)
         }
         if iconSymbol == initialIconSymbol, let base = baseIcon {
             return base
         }
-        return .symbol(iconSymbol)
+        return ActionIcon.resolve(from: iconSymbol)
     }
 
     /// Hero icon content sized appropriately for the 48x48 hero button.
@@ -86,6 +98,9 @@ struct ActionAppearanceFields: View {
         case .url:
             return String(localized: "Remote image — click to replace with an icon")
         case .local(let url):
+            if url.path.hasPrefix(Constants.customIconsDirectory.path) {
+                return String(localized: "Custom icon “\(url.lastPathComponent)” — click to change")
+            }
             return String(localized: "Package image “\(url.lastPathComponent)” — click to replace with an icon")
         }
     }
@@ -94,7 +109,8 @@ struct ActionAppearanceFields: View {
         HStack(alignment: .center, spacing: 14) {
             // Hero Icon Button
             Button {
-                showingIconPicker.toggle()
+                isIconPickerPresented = true
+                onPickIcon?()
             } label: {
                 ZStack(alignment: .bottomTrailing) {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -109,7 +125,7 @@ struct ActionAppearanceFields: View {
                         .frame(width: 48, height: 48)
 
                     Image(systemName: "pencil.circle.fill")
-                        .font(.system(size: 12))
+                        .font(.system(size: 17))
                         .foregroundColor(.secondary)
                         .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(1))
                         .offset(x: 2, y: 2)
@@ -119,8 +135,11 @@ struct ActionAppearanceFields: View {
             .buttonStyle(.plain)
             .help(iconButtonHelp)
             .onHover { isIconHovered = $0 }
-            .popover(isPresented: $showingIconPicker, arrowEdge: .bottom) {
-                IconPickerPopover(selectedIcon: $iconSymbol)
+            .accessibilityLabel(String(localized: "Choose icon"))
+            .popover(isPresented: $isIconPickerPresented, arrowEdge: .bottom) {
+                IconPickerPopover(selectedSymbol: $iconSymbol) {
+                    isIconPickerPresented = false
+                }
             }
 
             // Title & Display Mode Controls
@@ -130,20 +149,80 @@ struct ActionAppearanceFields: View {
                     .textFieldStyle(.roundedBorder)
 
                 HStack(spacing: 8) {
-                    Text("Popup Bar:")
+                    Text("Show as:")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
                     Picker("", selection: $displayMode) {
-                        Text("Show Icon").tag(0)
-                        Text("Show Text").tag(1)
+                        Text("Icon").tag(0)
+                        Text("Text").tag(1)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 160)
+                    .frame(width: 140)
                 }
             }
         }
         .padding(14)
+    }
+}
+
+// MARK: - Inset Group Card Container
+
+struct InsetGroupCard<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(cardStroke, lineWidth: 1)
+        )
+    }
+
+    private var cardFill: Color {
+        if colorScheme == .dark {
+            return Color.white.opacity(0.065)
+        } else {
+            return Color.primary.opacity(0.04)
+        }
+    }
+
+    private var cardStroke: Color {
+        if colorScheme == .dark {
+            return Color.white.opacity(0.12)
+        } else {
+            return Color.primary.opacity(0.06)
+        }
+    }
+}
+
+// MARK: - Icon Picker Page
+
+/// The icon chooser as a page of the settings window. It writes to whatever binding the router was
+/// handed when the page was pushed — the editor underneath stays mounted with its draft — and
+/// picking an icon is what leaves the page.
+@MainActor
+struct IconPickerPage: View {
+    @ObservedObject private var router = SettingsRouter.shared
+
+    var body: some View {
+        if let target = router.iconTarget {
+            IconPickerView(selectedSymbol: target, fillsAvailableHeight: true) {
+                router.pop()
+            }
+            .padding(20)
+            .settingsPaneWidth()
+        } else {
+            // Nothing to write to: the chooser was reached without an editor underneath it.
+            Color.clear.onAppear { router.pop() }
+        }
     }
 }

@@ -16,6 +16,7 @@ final class ActionCoordinatorTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        await MainActor.run { TestIsolation.reset() }
         if let tempDir {
             try? FileManager.default.removeItem(at: tempDir)
         }

@@ -60,7 +60,10 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         await ruleEngine.loadRules(from: rulesURL)
         await extensionManager.loadExtensions(from: extensionsDirectory)
 
-        // 3. Custom action groups
+        // 3. First-class custom actions
+        loadCustomActions()
+
+        // 4. Custom action groups
         loadGroupDefs()
     }
     
@@ -82,10 +85,21 @@ public final class ActionCoordinator: ObservableObject, Sendable {
     public func unregister(actionID: String) {
         registry.unregister(actionID: actionID)
     }
+
+    public func replaceActions(matching isMatch: @escaping (any Action) -> Bool, with newActions: [any Action]) {
+        registry.replaceRegisteredActions(matching: isMatch, with: newActions)
+        self.actions = registry.actions
+        syncGroupMemberOrder()
+    }
     
     public func moveActions(from source: IndexSet, to destination: Int) {
         registry.moveActions(from: source, to: destination)
         syncGroupMemberOrder()
+    }
+
+    public func setExtensionGroupMemberOrder(groupID: String, memberIDs: [String]) {
+        registry.setExtensionGroupMemberOrder(groupID: groupID, memberIDs: memberIDs)
+        self.actions = registry.actions
     }
 
     private func syncGroupMemberOrder() {
@@ -126,6 +140,123 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         }
     }
 
+    // MARK: - Custom Actions
+
+    public private(set) var customActions: [CustomAction] = []
+
+    public func loadCustomActions() {
+        if let data = settingsStore.get(.customActions),
+           let document = try? SettingsDocument<[CustomAction]>.decode(from: data) {
+            self.customActions = document.payload
+        } else {
+            self.customActions = []
+        }
+        for action in customActions {
+            registry.register(action: action)
+        }
+    }
+
+    public func saveCustomAction(_ action: CustomAction) {
+        var updated = customActions
+        if let idx = updated.firstIndex(where: { $0.id == action.id }) {
+            updated[idx] = action
+        } else {
+            updated.append(action)
+        }
+        persistCustomActions(updated)
+        registry.register(action: action)
+        self.actions = registry.actions
+        syncGroupMemberOrder()
+    }
+
+    public func deleteCustomAction(actionID: String) {
+        var updated = customActions
+        updated.removeAll(where: { $0.id == actionID })
+        persistCustomActions(updated)
+        registry.unregister(actionID: actionID)
+        self.actions = registry.actions
+
+        // Deleting an action has to take it out of any custom group, exactly like dragging it out
+        // does (`removeFromGroup`): drop the id from every group and disband a group the deletion
+        // emptied. `syncGroupMemberOrder` only re-sorts members, so without this a group kept a
+        // phantom member — and could survive as an empty row — until the next manual edit.
+        if !actionGroupDefs.isEmpty {
+            let hadMembers = nonEmptyGroupIDs
+            for index in actionGroupDefs.indices {
+                actionGroupDefs[index].memberActionIDs.removeAll { $0 == actionID }
+            }
+            saveAndApplyGroupDefs(pruningEmptiedFrom: hadMembers)
+        }
+
+        var disabled = settingsStore.get(.disabledActionIDs)
+        if disabled.contains(actionID) {
+            disabled.remove(actionID)
+            settingsStore.set(.disabledActionIDs, value: disabled)
+        }
+        // A deleted action's palette alias must go with it, or it stays reserved and a new action
+        // can never claim it ("That alias is already used").
+        ActionBindingStore.shared.setAlias(nil, for: actionID)
+        ActionCustomizationManager.shared.resetOverride(for: actionID)
+        syncGroupMemberOrder()
+    }
+
+    @discardableResult
+    public func duplicateCustomAction(actionID: String) -> CustomAction? {
+        guard let original = customActions.first(where: { $0.id == actionID }) else {
+            return nil
+        }
+        let newID = "custom.\(UUID().uuidString.prefix(8).lowercased())"
+        let override = ActionCustomizationManager.shared.override(for: actionID)
+        let baseTitle = override?.customTitle ?? original.title
+        let baseIcon = override?.customIconSymbol ?? original.iconName
+        let copyTitle = "\(baseTitle) Copy"
+
+        let duplicated = CustomAction(
+            id: newID,
+            title: copyTitle,
+            iconName: baseIcon,
+            type: original.type,
+            chrome: original.chrome,
+            rules: original.rules
+        )
+
+        saveCustomAction(duplicated)
+        insertActionOrderAfter(newID: newID, originalID: actionID)
+
+        for def in actionGroupDefs {
+            if let idx = def.memberActionIDs.firstIndex(of: actionID) {
+                addToGroup(actionID: newID, groupID: def.id, atIndex: idx + 1)
+                break
+            }
+        }
+
+        return duplicated
+    }
+
+    public func insertActionOrderAfter(newID: String, originalID: String) {
+        var order = settingsStore.get(.actionOrder)
+        if order.isEmpty {
+            order = registry.actions.map(\.id)
+        }
+        order.removeAll(where: { $0 == newID })
+        if let idx = order.firstIndex(of: originalID) {
+            order.insert(newID, at: idx + 1)
+        } else {
+            order.append(newID)
+        }
+        settingsStore.set(.actionOrder, value: order)
+        registry.sortActions()
+        self.actions = registry.actions
+        syncGroupMemberOrder()
+    }
+
+    private func persistCustomActions(_ actions: [CustomAction]) {
+        self.customActions = actions
+        if let encoded = try? SettingsDocument(payload: actions).encoded() {
+            settingsStore.set(.customActions, value: encoded)
+        }
+    }
+
     // MARK: - Custom Action Groups
 
     public func loadGroupDefs() {
@@ -156,7 +287,12 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         return true
     }
 
-    public func createGroup(title: String, iconName: String, memberActionIDs: [String] = []) {
+    /// Returns the new group's id. A group made with no members is kept — the user asked for an
+    /// empty folder to fill later — but one emptied by taking its last member out is still removed
+    /// (see `saveAndApplyGroupDefs(pruningEmptiedFrom:)`).
+    @discardableResult
+    public func createGroup(title: String, iconName: String, memberActionIDs: [String] = []) -> String? {
+        let hadMembers = nonEmptyGroupIDs
         var seen = Set<String>()
         var deduped: [String] = []
         for rawID in memberActionIDs {
@@ -180,7 +316,8 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         let newDef = ActionGroupDef(id: newID, title: title, iconName: resolvedIcon, memberActionIDs: deduped)
         updated.append(newDef)
         actionGroupDefs = updated
-        saveAndApplyGroupDefs()
+        saveAndApplyGroupDefs(pruningEmptiedFrom: hadMembers)
+        return actionGroupDefs.contains(where: { $0.id == newID }) ? newID : nil
     }
 
     private func isEligible(actionID: String, forGroup groupID: String, existingMembers: Set<String>) -> Bool {
@@ -205,6 +342,7 @@ public final class ActionCoordinator: ObservableObject, Sendable {
 
     public func updateGroup(groupID: String, title: String, iconName: String, memberActionIDs: [String]) {
         guard let index = actionGroupDefs.firstIndex(where: { $0.id == groupID }) else { return }
+        let hadMembers = nonEmptyGroupIDs.subtracting([groupID])
         let existingMembers = Set(actionGroupDefs[index].memberActionIDs)
         var seen = Set<String>()
         var deduped: [String] = []
@@ -219,7 +357,10 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         actionGroupDefs[index].title = title
         actionGroupDefs[index].iconName = resolvedIcon
         actionGroupDefs[index].memberActionIDs = deduped
-        saveAndApplyGroupDefs()
+        // An editor save keeps the group even with nothing in it: the user may have made the
+        // folder empty on purpose (or is editing a newly created empty one). Only the drag/edit
+        // paths that explicitly take a member out of a group disband an emptied group.
+        saveAndApplyGroupDefs(pruningEmptiedFrom: hadMembers)
         syncCatalogOrder(for: groupID, memberIDs: deduped)
     }
 
@@ -248,6 +389,7 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         guard isEligibleForGrouping(actionID: trimmedID) else { return }
         guard trimmedID != groupID else { return }
 
+        let hadMembers = nonEmptyGroupIDs
         // Remove action from any other existing group
         var updated = actionGroupDefs
         for i in 0..<updated.count {
@@ -266,7 +408,18 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         }
         updated[targetIndex].memberActionIDs = members
         actionGroupDefs = updated
-        saveAndApplyGroupDefs()
+        saveAndApplyGroupDefs(pruningEmptiedFrom: hadMembers)
+    }
+
+    public func memberActionIDs(for groupID: String) -> [String] {
+        if let def = actionGroupDefs.first(where: { $0.id == groupID }) {
+            return def.memberActionIDs
+        }
+        guard let groupAction = actions.first(where: { $0.id == groupID }) else { return [] }
+        if let provider = groupAction as? any SubActionProviding {
+            return provider.subActions(in: actions).map(\.id)
+        }
+        return actions.filter { $0.id != groupID && $0.id.hasPrefix(groupID + ".") }.map(\.id)
     }
 
     public func ungroup(groupID: String) {
@@ -276,8 +429,9 @@ public final class ActionCoordinator: ObservableObject, Sendable {
 
     public func removeFromGroup(actionID: String, groupID: String) {
         guard let index = actionGroupDefs.firstIndex(where: { $0.id == groupID }) else { return }
+        let hadMembers = nonEmptyGroupIDs
         actionGroupDefs[index].memberActionIDs.removeAll { $0 == actionID }
-        saveAndApplyGroupDefs()
+        saveAndApplyGroupDefs(pruningEmptiedFrom: hadMembers)
     }
 
     public func reset() {
@@ -291,7 +445,7 @@ public final class ActionCoordinator: ObservableObject, Sendable {
         settingsStore.set(.actionGroups, value: data)
     }
 
-    private func saveAndApplyGroupDefs() {
+    private func saveAndApplyGroupDefs(pruningEmptiedFrom previouslyNonEmpty: Set<String> = []) {
         for i in 0..<actionGroupDefs.count {
             let groupID = actionGroupDefs[i].id
             let existingMembers = Set(actionGroupDefs[i].memberActionIDs)
@@ -299,7 +453,26 @@ public final class ActionCoordinator: ObservableObject, Sendable {
                 isEligible(actionID: $0, forGroup: groupID, existingMembers: existingMembers)
             }
         }
+        // A group is a container for actions, so an empty one is a row in the popup bar that opens
+        // onto nothing: taking the last action out of a group takes the group with it, however it
+        // left — dragged to the top level, dragged into another group, or deleted outright.
+        //
+        // What counts as "taking the last action out" is a group that *had* members before this
+        // mutation and has none now, which is what `previouslyNonEmpty` records. A group the user
+        // created empty, or saved from its editor with nothing in it, was already empty, so it is
+        // a folder awaiting actions and stays.
+        //
+        // Only mutations come through here. `loadGroupDefs` deliberately does not, so a group whose
+        // members have not been registered yet survives launch.
+        actionGroupDefs.removeAll { $0.memberActionIDs.isEmpty && previouslyNonEmpty.contains($0.id) }
         saveGroupDefs(actionGroupDefs)
         registry.setGroupDefs(actionGroupDefs)
+    }
+
+    /// The ids of the groups that hold at least one member right now. Captured before a mutation so
+    /// `saveAndApplyGroupDefs(pruningEmptiedFrom:)` can tell a group that was emptied from one that
+    /// was created empty.
+    private var nonEmptyGroupIDs: Set<String> {
+        Set(actionGroupDefs.filter { !$0.memberActionIDs.isEmpty }.map(\.id))
     }
 }

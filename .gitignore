@@ -22,3 +22,7 @@ scripts/bin/
 skills-lock.json
 # Review handoff artifact written by sss:pr-review; not PR content.
 .pw-prove/
+plans/
+keys/
+openselection/
+.agents/skills/

@@ -11,13 +11,14 @@ final class ActionSearchTests: XCTestCase {
         func perform(_ context: ActionContext) async throws -> ActionResult { .success }
     }
 
-    private func item(_ id: String, _ title: String, _ keywords: String = "", _ usageRecency: Int = 0) -> ActionSearchIndex {
+    private func item(_ id: String, _ title: String, _ keywords: String = "", _ usageRecency: Int = 0, alias: String = "") -> ActionSearchIndex {
         ActionSearchIndex(
             id: id,
             title: title,
             keywords: keywords,
             action: MockSearchAction(id: id, title: title),
-            usageRecency: usageRecency
+            usageRecency: usageRecency,
+            alias: alias
         )
     }
 
@@ -114,5 +115,26 @@ final class ActionSearchTests: XCTestCase {
 
         let cjkResult = ActionSearch.search("翻訳", in: items)
         XCTAssertEqual(cjkResult.map(\.id), ["c"])
+    }
+
+    func testExactAliasRanksAboveTitlePrefix() {
+        let items = [
+            item("tree", "Tree"),
+            item("translate", "Quick Translate", alias: "tr"),
+        ]
+        let result = ActionSearch.search("tr", in: items)
+        XCTAssertEqual(result.map(\.id), ["translate", "tree"])
+    }
+
+    func testAliasMatchIsExactNotPrefix() {
+        let items = [item("translate", "Echo Box", alias: "tr")]
+        XCTAssertTrue(ActionSearch.search("t", in: items).isEmpty)
+        XCTAssertEqual(ActionSearch.search("tr", in: items).map(\.id), ["translate"])
+        XCTAssertTrue(ActionSearch.search("tra", in: items).isEmpty)
+    }
+
+    func testAliasMatchIsCaseInsensitive() {
+        let items = [item("copy", "Copy", alias: "cp")]
+        XCTAssertEqual(ActionSearch.search("CP", in: items).map(\.id), ["copy"])
     }
 }

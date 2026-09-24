@@ -13,6 +13,11 @@ final class SettingsStoreTests: XCTestCase {
         store = DefaultSettingsStore(userDefaults: userDefaults)
     }
 
+    override func tearDown() {
+        userDefaults?.removePersistentDomain(forName: #file)
+        super.tearDown()
+    }
+
     @MainActor
     func testTypedSettingReadWrite() {
         XCTAssertEqual(store.get(.actionOrder), [])
@@ -68,19 +73,6 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(store.get(.showMenuBarIcon))
     }
 
-    @MainActor
-    func testResultDeliveryDefaults() {
-        XCTAssertEqual(store.get(.primaryClickBehavior), "paste")
-        XCTAssertEqual(store.get(.secondaryClickBehavior), "copy")
-    }
-
-    @MainActor
-    func testResultDeliveryRoundTrip() {
-        store.set(.primaryClickBehavior, value: "preview")
-        store.set(.secondaryClickBehavior, value: "paste")
-        XCTAssertEqual(store.get(.primaryClickBehavior), "preview")
-        XCTAssertEqual(store.get(.secondaryClickBehavior), "paste")
-    }
 
     // MARK: - Safe fallbacks (issue #21)
 
@@ -129,5 +121,30 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(ResultDeliveryPreference(rawValue: "paste"), .paste)
         XCTAssertEqual(ResultDeliveryPreference(rawValue: "copy"), .copy)
         XCTAssertNil(ResultDeliveryPreference(rawValue: "bogus"))
+    }
+
+    // MARK: - Change-tracking metadata
+
+    @MainActor
+    func testMetadataAbsentUntilWrittenAndRecordsTimestamp() {
+        XCTAssertNil(store.metadata(for: .popupScale))
+
+        let before = Date()
+        store.set(.popupScale, value: 4)
+        let metadata = store.metadata(for: .popupScale)
+
+        XCTAssertEqual(metadata?.version, 1)
+        if let lastModified = metadata?.lastModified {
+            XCTAssertGreaterThanOrEqual(lastModified, before)
+        } else {
+            XCTFail("Expected metadata lastModified to be set after a write")
+        }
+    }
+
+    @MainActor
+    func testMetadataRecordsKeySchemaVersion() {
+        let key = SettingKey<String>("test.versioned", defaultValue: "", schemaVersion: 3)
+        store.set(key, value: "value")
+        XCTAssertEqual(store.metadata(for: key)?.version, 3)
     }
 }

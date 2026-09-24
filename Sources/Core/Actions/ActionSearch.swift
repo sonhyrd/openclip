@@ -2,9 +2,10 @@
 // OpenClip
 //
 // Defines the popup display mode and the pure, AppKit-free action-search matcher used by the
-// popup's action-search palette. Matching is case-insensitive: title prefix beats title contains,
-// which beats a fuzzy title subsequence, which beats keyword contains. Within a tier, tighter
-// fuzzy alignments come first, then usage recency (most recent first), then original order.
+// popup's action-search palette. Matching is case-insensitive: exact alias beats title prefix,
+// which beats title contains, which beats a fuzzy title subsequence, which beats keyword contains.
+// Within a tier, tighter fuzzy alignments come first, then usage recency (most recent first),
+// then original order.
 import Foundation
 
 /// The popup's display mode. Search and content modes are UI states, never Actions in the registry.
@@ -15,37 +16,42 @@ public enum PopupMode: Sendable, Equatable {
 }
 
 /// One searchable catalog entry. `title` is the display title, `keywords` adds searchable text
-/// (package name, id) that does not show in results.
+/// (package name, id) that does not show in results. `alias` is an optional exact-match jump
+/// key that outranks every title/keyword tier.
 public struct ActionSearchIndex: Sendable {
     public let id: String
     public let title: String
     public let keywords: String
+    public let alias: String
     public let action: any Action
     /// Pre-normalized (lowercased) search fields so `ActionSearch.search` never lowercases per
     /// catalog item per call — the index is built once per palette entry, so the cost lands
     /// there instead of on the per-keystroke hot path.
     let normalizedTitle: String
     let normalizedKeywords: String
+    let normalizedAlias: String
     /// MRU usage counter (higher = more recent); breaks ties below match quality. Zero = never
     /// used. Baked in at index build, constant for a palette session.
     public let usageRecency: Int
 
-    public init(id: String, title: String, keywords: String, action: any Action, usageRecency: Int = 0) {
+    public init(id: String, title: String, keywords: String, action: any Action, usageRecency: Int = 0, alias: String = "") {
         self.id = id
         self.title = title
         self.keywords = keywords
+        self.alias = alias
         self.action = action
         self.normalizedTitle = title.lowercased()
         self.normalizedKeywords = keywords.lowercased()
+        self.normalizedAlias = alias.lowercased()
         self.usageRecency = usageRecency
     }
 }
 
 public enum ActionSearch {
-    /// Returns `items` ranked for `query`. Match-kind tiers are hard: title prefix (3) beats
-    /// title contains (2), which beats a fuzzy title subsequence (1), which beats keyword
-    /// contains (0). Within a tier: tighter fuzzy alignments first, then usage recency (most
-    /// recent first), then original (bar) order as the final tie-break.
+    /// Returns `items` ranked for `query`. Match-kind tiers are hard: exact alias (4) beats
+    /// title prefix (3), which beats title contains (2), which beats a fuzzy title subsequence
+    /// (1), which beats keyword contains (0). Within a tier: tighter fuzzy alignments first,
+    /// then usage recency (most recent first), then original (bar) order as the final tie-break.
     public static func search(_ query: String, in items: [ActionSearchIndex]) -> [ActionSearchIndex] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return items }
@@ -54,7 +60,10 @@ public enum ActionSearch {
         let ranked: [(offset: Int, item: ActionSearchIndex, tier: Int, fuzzyScore: Int)] = items.enumerated().compactMap { offset, item in
             let tier: Int
             let fuzzyScore: Int
-            if item.normalizedTitle.hasPrefix(normalized) {
+            if !item.normalizedAlias.isEmpty, item.normalizedAlias == normalized {
+                tier = 4
+                fuzzyScore = 0
+            } else if item.normalizedTitle.hasPrefix(normalized) {
                 tier = 3
                 fuzzyScore = 0
             } else if item.normalizedTitle.contains(normalized) {

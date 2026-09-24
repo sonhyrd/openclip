@@ -9,7 +9,7 @@
 import Foundation
 import Core
 
-public struct ShortcutAction: Action {
+public struct ShortcutAction: ConfigurableAction, ActionWithRules {
     public let id: String
     public let title: String
     public let icon: ActionIcon

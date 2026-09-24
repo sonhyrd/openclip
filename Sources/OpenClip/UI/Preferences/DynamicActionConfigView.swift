@@ -29,19 +29,13 @@ public struct DynamicActionConfigView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
-                if index > 0 {
-                    Divider()
-                        .padding(.horizontal, 12)
-                }
-                DynamicOptionRowView(
-                    actionID: actionID,
-                    option: option,
-                    optionStore: optionStore,
-                    missingOptionIDs: missingOptionIDs
-                )
-            }
+        ForEach(options, id: \.id) { option in
+            DynamicOptionRowView(
+                actionID: actionID,
+                option: option,
+                optionStore: optionStore,
+                missingOptionIDs: missingOptionIDs
+            )
         }
     }
 }
@@ -133,44 +127,52 @@ struct DynamicOptionRowView: View {
                 if let choices = option.options, !choices.isEmpty {
                     Picker("", selection: binding) {
                         ForEach(choices, id: \.self) { choice in
-                            Text(choiceDisplayLabel(choice)).tag(choice)
+                            Text(Self.choiceDisplayLabel(choice)).tag(choice)
                         }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .missingFieldHighlight(isMissing)
                 } else {
-                    TextField(option.label, text: binding)
+                    TextField("", text: binding, prompt: Text(option.label))
                         .textFieldStyle(.roundedBorder)
+                        .labelsHidden()
                         .frame(maxWidth: 200)
                         .missingFieldHighlight(isMissing)
                 }
 
             case .secret:
-                SecureField(option.label, text: binding)
+                SecureField("", text: binding, prompt: Text(option.label))
                     .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
                     .frame(maxWidth: 200)
                     .missingFieldHighlight(isMissing)
 
             case .string:
-                TextField(option.label, text: binding)
+                TextField("", text: binding, prompt: Text(option.label))
                     .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
                     .frame(maxWidth: 200)
                     .missingFieldHighlight(isMissing)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 2)
     }
 
-    private func choiceDisplayLabel(_ choice: String) -> String {
+    static func choiceDisplayLabel(_ choice: String) -> String {
         switch choice.lowercased() {
         case "native": return String(localized: "Native (Default .ics)")
         case "busycal": return "BusyCal"
         case "fantastical": return "Fantastical"
         case "apple": return String(localized: "Apple Calendar")
         case "google": return String(localized: "Google Calendar")
-        default: return choice.capitalized
+        default:
+            // Preserve author-specified casing (e.g. "UTC", "USD", "12h", "CET").
+            // Only title-case letter-leading, all-lowercase slugs (e.g. "english" -> "English").
+            if choice.first?.isLetter == true, choice == choice.lowercased() {
+                return choice.capitalized
+            }
+            return choice
         }
     }
 }
@@ -277,8 +279,7 @@ private struct SearchEngineURLOptionView: View {
                     .missingFieldHighlight(isMissing)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 2)
     }
 }
 

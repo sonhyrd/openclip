@@ -27,6 +27,25 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
         )
     }
 
+    /// An app that exposes no usable AX role for its text (custom-drawn editors/terminals):
+    /// everything the gate could key off is absent.
+    private static func opaqueTarget(containedInRoles: Set<String> = []) -> AXElementInspector.Target {
+        AXElementInspector.Target(
+            focusedApp: nil,
+            focusedElement: nil,
+            role: nil,
+            subRole: nil,
+            parentRoles: [],
+            containedInRoles: containedInRoles,
+            webArea: nil,
+            selectedText: nil,
+            selectedTextMarkerRange: nil,
+            value: nil,
+            selectedTextRange: nil,
+            bounds: nil
+        )
+    }
+
     private static func webAreaTarget(selectedText: String) -> AXElementInspector.Target {
         AXElementInspector.Target(
             focusedApp: nil,
@@ -199,6 +218,48 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
         XCTAssertEqual(result?.text, "copy fallback")
     }
 
+    private actor CopyCallTracker {
+        var copyInvoked = false
+        func recordCopy() { copyInvoked = true }
+    }
+
+    func testAllowCopyFallbackFalseSkipsCopyCapture() async {
+        let tracker = CopyCallTracker()
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: nil) },
+            copyCapture: { _ in
+                await tracker.recordCopy()
+                return TextResult(text: "should not be called")
+            }
+        )
+        let policy = AppPolicyContext(retrievalMode: .axWebArea)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.openai.codex"),
+            policy: policy,
+            cursor: .unknown,
+            allowCopyFallback: false
+        )
+        XCTAssertNil(result)
+        let invoked = await tracker.copyInvoked
+        XCTAssertFalse(invoked, "copyCapture must not be invoked when allowCopyFallback is false")
+    }
+
+    func testRetrieveDetailsIdentifiesEditableTextControl() async {
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: nil, role: "AXTextField") },
+            copyCapture: { _ in nil }
+        )
+        let outcome = await coordinator.retrieveDetails(
+            for: AppIdentity(bundleIdentifier: "com.openai.codex"),
+            policy: AppPolicyContext.default,
+            cursor: CursorClass.unknown,
+            allowCopyFallback: false
+        )
+        XCTAssertNil(outcome.result)
+        XCTAssertTrue(outcome.isEditable, "AXTextField must be identified as editable context")
+    }
+
+
     // MARK: - Copy modes
 
     func testMenuCopyProceedsWithoutConfirmedSelection() async {
@@ -238,11 +299,34 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
         )
         let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
         let result = await coordinator.retrieve(
-            for: AppIdentity(bundleIdentifier: "com.microsoft.VSCode"),
+            for: AppIdentity(bundleIdentifier: "com.sublimetext.3"),
             policy: policy,
             cursor: .unknown
         )
         XCTAssertEqual(result?.text, "captured keyboard copy")
+    }
+
+    /// Electron/Chromium apps are copy-classified but now read AX first (non-destructively) before
+    /// posting ⌘C.
+    func testElectronKeyboardCopyPrefersAXTextOverCopy() async {
+        final class Counter: @unchecked Sendable { var calls = 0 }
+        let counter = Counter()
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: "electron ax text") },
+            copyCapture: { _ in
+                counter.calls += 1
+                return TextResult(text: "captured keyboard copy")
+            }
+        )
+        let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.microsoft.VSCode"),
+            policy: policy,
+            cursor: .unknown,
+            allowCopyFallback: false
+        )
+        XCTAssertEqual(result?.text, "electron ax text")
+        XCTAssertEqual(counter.calls, 0, "AX read must win over the synthetic copy")
     }
 
     func testKeyboardCopyHasNoFallbackBelowIt() async {
@@ -363,6 +447,96 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
         XCTAssertEqual(result?.text, "captured select-all text")
     }
 
+    /// Regression (from a real log): in Zed a drag and a ⇧+arrow both retrieved fine through the
+    /// copy strategy one second apart, while ⌘A in the same element was refused — the guard
+    /// demanded a *known* text role, and editors/terminals that draw their own text expose none.
+    /// Only a recognized row container may refuse a select-all now.
+    func testSelectAllProceedsOnAppWithNoRecognizableAXRole() async {
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.opaqueTarget() },
+            copyCapture: { _ in TextResult(text: "captured select-all text") }
+        )
+        let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "dev.zed.Zed"),
+            policy: policy,
+            cursor: .beam,
+            isSelectAll: true
+        )
+        XCTAssertEqual(result?.text, "captured select-all text")
+    }
+
+    /// A canvas drag (Figma): opaque AX role, arrow cursor, no selection signal. The copy strategy
+    /// must not fire — a synthetic ⌘C here mutates the app's selection/undo state instead of
+    /// reading text.
+    func testCopySkippedOnCanvasDragWithoutTextEvidence() async {
+        final class Counter: @unchecked Sendable { var calls = 0 }
+        let counter = Counter()
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.opaqueTarget(containedInRoles: ["AXWebArea"]) },
+            copyCapture: { _ in
+                counter.calls += 1
+                return TextResult(text: "copied object")
+            }
+        )
+        let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.figma.Desktop"),
+            policy: policy,
+            cursor: .arrow
+        )
+        XCTAssertNil(result)
+        XCTAssertEqual(counter.calls, 0, "A canvas drag must never post a synthetic ⌘C")
+    }
+
+    func testCopyEvidenceGateDisabledForExplicitTriggers() async {
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.opaqueTarget(containedInRoles: ["AXWebArea"]) },
+            copyCapture: { _ in TextResult(text: "explicit hotkey capture") }
+        )
+        let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.figma.Desktop"),
+            policy: policy,
+            cursor: .arrow,
+            requireCopyEvidence: false
+        )
+        XCTAssertEqual(result?.text, "explicit hotkey capture")
+    }
+
+    /// A row container nested above the focused element still refuses — the Finder/Mail case the
+    /// guard exists for reaches it through `containedInRoles`, not the focused role.
+    func testSelectAllSkippedInsideRowContainer() async {
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.opaqueTarget(containedInRoles: ["AXScrollArea", "AXOutline"]) },
+            copyCapture: { _ in TextResult(text: "should not copy rows") }
+        )
+        let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.apple.finder"),
+            policy: policy,
+            cursor: .unknown,
+            isSelectAll: true
+        )
+        XCTAssertNil(result)
+    }
+
+    /// A text field being edited inside a table is text, not a row selection.
+    func testSelectAllProceedsInTextFieldInsideTable() async {
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: "cell text", role: "AXTextField") },
+            copyCapture: { _ in TextResult(text: "cell text") }
+        )
+        let policy = AppPolicyContext(retrievalMode: .keyboardCopy)
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.apple.Numbers"),
+            policy: policy,
+            cursor: .unknown,
+            isSelectAll: true
+        )
+        XCTAssertEqual(result?.text, "cell text")
+    }
+
     func testSelectAllDoesNotGateNonCopyModes() async {
         let coordinator = SelectionRetrievalCoordinator(
             inspect: { Self.textFieldTarget(selectedText: "selected text") }
@@ -396,14 +570,13 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
     func testBrowserScriptFallsBackThroughWebAreaThenCopy() async {
         let coordinator = SelectionRetrievalCoordinator(
             inspect: { Self.webAreaTarget(selectedText: "") },
-            browserRead: { _ in nil },
             copyCapture: { _ in TextResult(text: "browser copy fallback") }
         )
         let policy = AppPolicyContext(retrievalMode: .browserScript)
         let result = await coordinator.retrieve(
             for: AppIdentity(bundleIdentifier: "com.apple.Safari"),
             policy: policy,
-            cursor: .unknown
+            cursor: .beam
         )
         XCTAssertEqual(result?.text, "browser copy fallback")
     }
@@ -412,7 +585,8 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
 
     func testRetrieveRejectsWhitespaceOnlySelection() async {
         let coordinator = SelectionRetrievalCoordinator(
-            inspect: { Self.textFieldTarget(selectedText: "   \n  ") }
+            inspect: { Self.textFieldTarget(selectedText: "   \n  ") },
+            copyCapture: { _ in nil }
         )
         let policy = AppPolicyContext(retrievalMode: .axTextControl)
         let result = await coordinator.retrieve(
@@ -513,34 +687,20 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
         XCTAssertEqual(result?.text, "copied from preview pdf")
     }
 
-    func testBrowserCascadeOmitsBrowserScript() async {
-        final class Counter: @unchecked Sendable { var calls = 0 }
-        let counter = Counter()
-        let coordinator = SelectionRetrievalCoordinator(
-            inspect: { Self.textFieldTarget(selectedText: nil) },
-            browserRead: { _ in
-                counter.calls += 1
-                return BrowserScriptStrategy.BrowserResult(text: "unexpected script")
-            },
-            copyCapture: { _ in TextResult(text: "copied") }
-        )
-        let policy = AppPolicyContext(retrievalMode: .axWebArea)
-        let result = await coordinator.retrieve(
-            for: AppIdentity(bundleIdentifier: "com.google.Chrome"),
-            policy: policy,
-            cursor: .unknown
-        )
-        XCTAssertEqual(result?.text, "copied")
-        XCTAssertEqual(counter.calls, 0, "Browsers must not invoke browserScript")
-    }
-
     // MARK: - Rich-content enrichment
 
     func testTextOnlyWebAreaWinEnrichesFromPasteboardCapture() async {
+        // Fork patch (https://github.com/sonhyrd/openclip/issues/29): OpenSelection 0.2.4 turned
+        // `enrichRichContent` off by default (only OPENCLIP_ENABLE_RICH_CAPTURE=1 enables it), so
+        // enable it explicitly here. Drop once upstream fixes this test.
+        var configuration = SelectionConfiguration.default
+        configuration.enrichRichContent = true
         let coordinator = SelectionRetrievalCoordinator(
+            configuration: configuration,
             inspect: { Self.webAreaTarget(selectedText: "plain selection") },
-            browserRead: { _ in nil },
-            copyCapture: { _ in TextResult(text: "rich selection", html: "<b>rich</b> selection") }
+            copyCapture: { _ in
+                SelectionResult(text: "rich selection", html: "<b>rich</b> selection", strategy: .keyboardCopy)
+            }
         )
         let policy = AppPolicyContext(retrievalMode: .axWebArea)
         let result = await coordinator.retrieve(
@@ -563,7 +723,12 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
             }
         )
         let policy = AppPolicyContext(retrievalMode: .axTextControl)
-        let nativeBundleID = try XCTUnwrap(DefaultAppRules.nativeApps.first)
+        // A strictly-native app that is *not* a rich document app (those now enrich from the pasteboard).
+        let richDocumentBundleIDs: Set<String> = [
+            "com.apple.Notes", "com.apple.TextEdit", "com.apple.iWork.Pages",
+            "com.apple.iWork.Numbers", "com.apple.iWork.Keynote", "com.apple.mail"
+        ]
+        let nativeBundleID = try XCTUnwrap(DefaultAppRules.nativeApps.first { !richDocumentBundleIDs.contains($0) })
         let result = await coordinator.retrieve(
             for: AppIdentity(bundleIdentifier: nativeBundleID),
             policy: policy,
@@ -598,7 +763,6 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
     func testEnrichmentKeepsOriginalWhenCaptureYieldsNoRichContent() async {
         let coordinator = SelectionRetrievalCoordinator(
             inspect: { Self.webAreaTarget(selectedText: "plain selection") },
-            browserRead: { _ in nil },
             copyCapture: { _ in TextResult(text: "plain capture") }
         )
         let policy = AppPolicyContext(retrievalMode: .axWebArea)
@@ -738,6 +902,217 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
         for task in parkedResults {
             let value = await task.value
             XCTAssertEqual(value?.text, "parked")
+        }
+    }
+
+    /// A blocked Edit ▸ Copy press must release `inspectGate` at `axReadTimeout`.
+    /// A new inspect must then complete immediately.
+    func testMenuCopyPressPermitFreesAtWatchdogDeadlineWhileWorkerStillHung() async {
+        let pressStarted = expectation(description: "hung menu press started")
+        let zombieUnblock = DispatchSemaphore(value: 0)
+        defer { zombieUnblock.signal() }
+
+        let hungCoordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: nil) },
+            copyCapture: { trigger in
+                await MainActor.run { trigger() }
+                return nil
+            },
+            menuPress: { _ in
+                pressStarted.fulfill()
+                zombieUnblock.wait()
+            }
+        )
+        let freshCoordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: "fresh") }
+        )
+        let menuPolicy = AppPolicyContext(retrievalMode: .menuCopy)
+        let inspectPolicy = AppPolicyContext(retrievalMode: .axTextControl)
+
+        async let hungResult = hungCoordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.apple.Terminal"),
+            policy: menuPolicy,
+            cursor: .unknown
+        )
+
+        await fulfillment(of: [pressStarted], timeout: 2.0)
+        _ = await hungResult
+
+        try? await Task.sleep(nanoseconds: UInt64((Constants.axReadTimeout + 0.1) * 1_000_000_000))
+
+        let freshStart = Date()
+        let freshResult = await freshCoordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.test.app"),
+            policy: inspectPolicy,
+            cursor: .unknown
+        )
+        XCTAssertLessThan(Date().timeIntervalSince(freshStart), Constants.axReadTimeout,
+                          "new read must not wait behind the abandoned hung menu press")
+        XCTAssertEqual(freshResult?.text, "fresh",
+                       "permit must be usable again right after the press watchdog deadline")
+    }
+
+    /// Four blocked Edit ▸ Copy presses must not keep `inspectGate` full.
+    /// After `axReadTimeout`, a new inspect must succeed.
+    func testFourHungMenuCopyPressesDoNotPermanentlyLockOutInspect() async {
+        let starts = PressStartSignal()
+        let zombieUnblock = DispatchSemaphore(value: 0)
+        defer {
+            for _ in 0..<Constants.axMaxConcurrentInspects { zombieUnblock.signal() }
+        }
+
+        let hungCoordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: nil) },
+            copyCapture: { trigger in
+                await MainActor.run { trigger() }
+                return nil
+            },
+            menuPress: { _ in
+                starts.signal()
+                zombieUnblock.wait()
+            }
+        )
+        let freshCoordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: "fresh") }
+        )
+        let menuPolicy = AppPolicyContext(retrievalMode: .menuCopy)
+        let inspectPolicy = AppPolicyContext(retrievalMode: .axTextControl)
+
+        var hungTasks: [Task<TextResult?, Never>] = []
+        for index in 1...Constants.axMaxConcurrentInspects {
+            hungTasks.append(Task {
+                await hungCoordinator.retrieve(
+                    for: AppIdentity(bundleIdentifier: "com.apple.Terminal"),
+                    policy: menuPolicy,
+                    cursor: .unknown
+                )
+            })
+            await starts.waitUntil(index)
+        }
+
+        let overflowStart = Date()
+        let overflow = await freshCoordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.test.app"),
+            policy: inspectPolicy,
+            cursor: .unknown
+        )
+        XCTAssertNil(overflow, "saturated gate must skip inspect while four hung presses hold permits")
+        XCTAssertLessThan(Date().timeIntervalSince(overflowStart), 0.3,
+                          "the overflow read must fail fast, not queue")
+
+        try? await Task.sleep(nanoseconds: UInt64((Constants.axReadTimeout + 0.1) * 1_000_000_000))
+
+        let recoveredStart = Date()
+        let recovered = await freshCoordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.test.app"),
+            policy: inspectPolicy,
+            cursor: .unknown
+        )
+        XCTAssertLessThan(Date().timeIntervalSince(recoveredStart), Constants.axReadTimeout,
+                          "inspect must not stay locked out after press watchdogs fire")
+        XCTAssertEqual(recovered?.text, "fresh")
+
+        for task in hungTasks { _ = await task.value }
+    }
+
+    // MARK: - Microsoft Office & Copy Guarding (Issue #90)
+
+    func testMicrosoftOfficeCascadesToOfficeScriptAndDoesNotCopy() async {
+        final class CopyCounter: @unchecked Sendable { var count = 0 }
+        let copyCounter = CopyCounter()
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: nil) },
+            copyCapture: { _ in
+                copyCounter.count += 1
+                return TextResult(text: "clobbered copy")
+            },
+            scriptRunner: { script in
+                XCTAssertTrue(script.contains("com.microsoft.Word"))
+                return "text from word selection"
+            }
+        )
+
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.microsoft.Word"),
+            policy: AppPolicyContext(retrievalMode: .axTextControl),
+            cursor: .unknown
+        )
+
+        XCTAssertEqual(result?.text, "text from word selection")
+        XCTAssertEqual(copyCounter.count, 0, "Office must be retrieved via AppleScript without firing copy")
+    }
+
+    func testMicrosoftOfficeWithMissingValueReturnsNilWithoutFallback() async {
+        final class CopyCounter: @unchecked Sendable { var count = 0 }
+        let copyCounter = CopyCounter()
+        let coordinator = SelectionRetrievalCoordinator(
+            inspect: { Self.textFieldTarget(selectedText: nil) },
+            copyCapture: { _ in
+                copyCounter.count += 1
+                return TextResult(text: "clobbered copy")
+            },
+            scriptRunner: { _ in "missing value" }
+        )
+
+        let result = await coordinator.retrieve(
+            for: AppIdentity(bundleIdentifier: "com.microsoft.Word"),
+            policy: AppPolicyContext(retrievalMode: .axTextControl),
+            cursor: .unknown
+        )
+
+        XCTAssertNil(result, "missing value indicates no active selection in Word")
+        XCTAssertEqual(copyCounter.count, 0, "Must never fall back to keyboard copy in Office")
+    }
+
+    func testMicrosoftOfficeScriptTemplates() {
+        XCTAssertTrue(SelectionRetrievalCoordinator.isMicrosoftOffice("com.microsoft.Word"))
+        XCTAssertTrue(SelectionRetrievalCoordinator.isMicrosoftOffice("com.microsoft.Excel"))
+        XCTAssertTrue(SelectionRetrievalCoordinator.isMicrosoftOffice("com.microsoft.Powerpoint"))
+        XCTAssertFalse(SelectionRetrievalCoordinator.isMicrosoftOffice("com.apple.TextEdit"))
+
+        let wordScript = SelectionRetrievalCoordinator.officeScript(for: "com.microsoft.Word")
+        XCTAssertTrue(wordScript?.contains("com.microsoft.Word") == true)
+        XCTAssertTrue(wordScript?.contains("content of text object of selection") == true)
+
+        let excelScript = SelectionRetrievalCoordinator.officeScript(for: "com.microsoft.Excel")
+        XCTAssertTrue(excelScript?.contains("com.microsoft.Excel") == true)
+        XCTAssertTrue(excelScript?.contains("string value of selection") == true)
+
+        let pptScript = SelectionRetrievalCoordinator.officeScript(for: "com.microsoft.Powerpoint")
+        XCTAssertTrue(pptScript?.contains("com.microsoft.Powerpoint") == true)
+        XCTAssertTrue(pptScript?.contains("selection of active window") == true)
+        XCTAssertTrue(pptScript?.contains("selection type text") == true)
+    }
+}
+
+/// Counts started menu presses.
+/// Tests start one blocked `.menuCopy` retrieve at a time.
+/// This keeps inspect permits and press permits from overlapping.
+private final class PressStartSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func signal() {
+        lock.lock()
+        count += 1
+        let n = count
+        let ready = waiters.filter { n >= $0.0 }
+        waiters.removeAll { $0.0 <= n }
+        lock.unlock()
+        ready.forEach { $0.1.resume() }
+    }
+
+    func waitUntil(_ target: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if count >= target {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append((target, continuation))
+            lock.unlock()
         }
     }
 }

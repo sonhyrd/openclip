@@ -35,6 +35,17 @@ public struct PopupView: View {
     public let onCancelSubBarDwell: (@MainActor () -> Void)?
     /// Called when the AI result card should collapse back to the bar (back chevron).
     public let onExitContent: @MainActor () -> Void
+    /// Called when the result card should close outright (Esc) — the popup goes away rather than
+    /// falling back to the bar.
+    public let onDismissContent: @MainActor () -> Void
+    /// Called as the result card's header handle is dragged, so the controller can move the panel.
+    public let onCardDrag: (@MainActor (ResultCardDragPhase) -> Void)?
+    /// Called as a resize handle of the result card or the search palette is dragged, so the
+    /// controller can resize the surface (and the panel around it) and remember the size.
+    public let onResize: (@MainActor (PopupResizeEdge, ResultCardDragPhase) -> Void)?
+    /// Called when the user taps the pin button on the result card. The controller reacts by
+    /// setting `hasUserMovedCard = true` (making the card modal) and toggling `modeStore.isCardPinned`.
+    public let onPinCard: (@MainActor () -> Void)?
     /// The AI result card's Paste/Copy buttons — explicit user requests routed through the
     /// controller's keep-open card-effect door (bypasses the paste-vs-copy re-decision).
     public let onCardEffect: @MainActor (ActionResult) -> Void
@@ -49,24 +60,47 @@ public struct PopupView: View {
     /// Called when an action is actually run (bar / palette / AI), so the controller can record usage.
     public let onActionPerformed: (@MainActor (String) -> Void)?
     /// Called right before an action performs (before `onResult` can fire), so the controller can
-    /// snapshot the action's declared delivery for the paste-vs-copy decision.
-    public let onWillPerformAction: (@MainActor (any Action) -> Void)?
+    /// snapshot the action's declared delivery for the paste-vs-copy decision. The intent is
+    /// carried explicitly so the delivery snapshot matches the perform context.
+    public let onWillPerformAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)?
     /// Called when a `showsLoading` bar action is clicked: the controller early-closes the popup
-    /// and runs the action via the loading toast flow instead of the inline perform path.
-    public let onRunLoadingAction: (@MainActor (any Action) -> Void)?
+    /// and runs the action via the loading toast flow instead of the inline perform path. Carries
+    /// the same explicit intent as `onWillPerformAction`.
+    public let onRunLoadingAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)?
     /// Called when an AI preset action is run: the controller closes the popup and runs via the loading toast flow.
     public let onRunAI: (@MainActor (String) -> Void)?
+    /// Runs a palette instruction (the "Ask AI" row or a recent prompt) on the selection:
+    /// `(instruction, replace)` — paste the answer over the selection, or show the result card.
+    /// nil falls back to the view's own card flow (preview/static hosts).
+    public let onRunAIPrompt: (@MainActor (String, Bool, Bool) -> Void)?
+    /// Saves the palette's typed query as a reusable AI tool and runs it (the "Save as AI tool"
+    /// row), same flag. nil falls back to the view's own flow.
+    public let onSaveAIPrompt: (@MainActor (String, Bool) -> Void)?
+    /// Runs an instruction typed into the result card's follow-up field on the card's current
+    /// text (the controller re-streams the card in place). nil hides the field.
+    public let onFollowUp: (@MainActor (String) -> Void)?
+    /// Cancels a follow-up in flight (Esc while the card refines), keeping the previous answer.
+    public let onCancelFollowUp: (@MainActor () -> Void)?
     /// Returns the click intent captured at mouse-down for the current click, so the left-click
     /// perform path can thread a force-copy click (⇧-click) into the action context.
     public let onClickIntent: @MainActor () -> ActionResultDelivery.ClickIntent
+    /// Shows the hover tooltip for a bar button in the controller's screen-space tooltip window:
+    /// (text, button frame in popupHoverSpace, effective theme token, isDark). The controller
+    /// converts the frame to screen coordinates and places the tooltip via TooltipPlacer so it
+    /// escapes the panel's clipping and avoids the expanded sub-bar.
+    public let onShowTooltip: (@MainActor (String, CGRect, String, Bool) -> Void)?
+    /// Hides the screen-space hover tooltip.
+    public let onHideTooltip: (@MainActor () -> Void)?
     /// True when this is a static preview — hover tracking is disabled entirely so the
     /// preview never reacts to (or leaks into) the real popup's shared hover state.
     private let isStatic: Bool
 
-    @AppStorage(SettingKey.popupTheme.name) private var selectedTheme: String = SettingKey.popupTheme.defaultValue
-    @AppStorage(SettingKey.popupThemeColor.name) private var themeColor: String = SettingKey.popupThemeColor.defaultValue
-    @AppStorage(SettingKey.popupScale.name) private var popupScale: Int = SettingKey.popupScale.defaultValue
-    @AppStorage(SettingKey.popupBarWidth.name) private var barWidthLevel: Int = SettingKey.popupBarWidth.defaultValue
+    @Setting(SettingKey.popupTheme) private var selectedTheme
+    @Setting(SettingKey.popupThemeColor) private var themeColor
+    @Setting(SettingKey.popupScale) private var popupScale
+    @Setting(SettingKey.popupBarWidth) private var barWidthLevel
+    @Setting(SettingKey.contextualActionsEnabled) private var contextualActionsEnabled
+    @Setting(SettingKey.disabledContextualActionIDs) private var disabledContextualIDs
     @Environment(\.colorScheme) private var colorScheme
 
     private var themeCategory: PopupThemeModel.Category {
@@ -85,7 +119,7 @@ public struct PopupView: View {
         return PopupThemeModel.classicToken(appearance: themeColor, systemIsDark: colorScheme == .dark)
     }
     
-    @AppStorage(SettingKey.completionCopyToClipboard.name) private var completionCopyToClipboard: Bool = SettingKey.completionCopyToClipboard.defaultValue
+    @Setting(SettingKey.completionCopyToClipboard) private var completionCopyToClipboard
     
     @State private var currentPage = 0
     /// The hover state this bar reads. Deliberately *not* `@ObservedObject`: `location` publishes at
@@ -121,15 +155,14 @@ public struct PopupView: View {
     /// Completions are computed exactly once per show — the selection text is fixed for this view's
     /// lifetime — and cached, so NSSpellChecker dictionary work never runs inside `body`.
     @State private var cachedCompletions: [String]
-    @State private var activeTooltip: (text: String, frame: CGRect)? = nil
-    @State private var tooltipTask: Task<Void, Never>? = nil
-    @State private var isTooltipHot: Bool = false
+    @State private var tooltipPresenter = TooltipPresenter()
 
     private var scale: CGFloat { PopupMetrics.scaleMultiplier(for: popupScale) }
     private var buttonWidth: CGFloat { PopupMetrics.actionButtonWidth * scale }
     private var chevronWidth: CGFloat { 29 * scale }
     private var barButtonHeight: CGFloat { PopupMetrics.barButtonHeight * scale }
     private var cornerRadius: CGFloat { PopupMetrics.popupCornerRadius * scale }
+    private var islandGap: CGFloat { PopupMetrics.splitIslandGap * scale }
 
     @MainActor
     public init(
@@ -146,6 +179,10 @@ public struct PopupView: View {
         onEnterSearch: @escaping @MainActor (CGRect?) -> Void = { _ in },
         onExitSearch: @escaping @MainActor () -> Void = {},
         onExitContent: @escaping @MainActor () -> Void = {},
+        onDismissContent: (@MainActor () -> Void)? = nil,
+        onCardDrag: (@MainActor (ResultCardDragPhase) -> Void)? = nil,
+        onResize: (@MainActor (PopupResizeEdge, ResultCardDragPhase) -> Void)? = nil,
+        onPinCard: (@MainActor () -> Void)? = nil,
         onCardEffect: @escaping @MainActor (ActionResult) -> Void = { _ in },
         onResult: @escaping @MainActor (ActionResult) -> Void,
         onContentSizeChange: (@MainActor (CGSize) -> Void)? = nil,
@@ -159,10 +196,16 @@ public struct PopupView: View {
         onEnteredScopedSearch: (@MainActor (any Action, CGRect?) -> Void)? = nil,
         onPaginationAnchor: (@MainActor (PopupPanel.HorizontalAnchor) -> Void)? = nil,
         onActionPerformed: (@MainActor (String) -> Void)? = nil,
-        onWillPerformAction: (@MainActor (any Action) -> Void)? = nil,
-        onRunLoadingAction: (@MainActor (any Action) -> Void)? = nil,
+        onWillPerformAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)? = nil,
+        onRunLoadingAction: (@MainActor (any Action, ActionResultDelivery.ClickIntent) -> Void)? = nil,
         onRunAI: (@MainActor (String) -> Void)? = nil,
-        onClickIntent: @escaping @MainActor () -> ActionResultDelivery.ClickIntent = { .primary }
+        onRunAIPrompt: (@MainActor (String, Bool, Bool) -> Void)? = nil,
+        onSaveAIPrompt: (@MainActor (String, Bool) -> Void)? = nil,
+        onFollowUp: (@MainActor (String) -> Void)? = nil,
+        onCancelFollowUp: (@MainActor () -> Void)? = nil,
+        onClickIntent: @escaping @MainActor () -> ActionResultDelivery.ClickIntent = { .primary },
+        onShowTooltip: (@MainActor (String, CGRect, String, Bool) -> Void)? = nil,
+        onHideTooltip: (@MainActor () -> Void)? = nil
     ) {
         self.actions = actions
         self.allActions = allActions ?? actions
@@ -176,6 +219,10 @@ public struct PopupView: View {
         self.onRequestSubBarDwell = onRequestSubBarDwell
         self.onCancelSubBarDwell = onCancelSubBarDwell
         self.onExitContent = onExitContent
+        self.onDismissContent = onDismissContent ?? onExitContent
+        self.onCardDrag = onCardDrag
+        self.onResize = onResize
+        self.onPinCard = onPinCard
         self.onCardEffect = onCardEffect
         self.onHoveredActionChanged = onHoveredActionChanged
         self.onEnteredScopedSearch = onEnteredScopedSearch
@@ -184,7 +231,13 @@ public struct PopupView: View {
         self.onWillPerformAction = onWillPerformAction
         self.onRunLoadingAction = onRunLoadingAction
         self.onRunAI = onRunAI
+        self.onRunAIPrompt = onRunAIPrompt
+        self.onSaveAIPrompt = onSaveAIPrompt
+        self.onFollowUp = onFollowUp
+        self.onCancelFollowUp = onCancelFollowUp
         self.onClickIntent = onClickIntent
+        self.onShowTooltip = onShowTooltip
+        self.onHideTooltip = onHideTooltip
         self.isStatic = isStatic
         self.hoverState = hoverState
         self.presenter = presenter
@@ -248,14 +301,54 @@ public struct PopupView: View {
         PopupMetrics.barWidth(for: barWidthLevel) * scale
     }
 
+    /// Matching prioritized contextual actions (e.g. Calculate for math, Open Link for URLs, Calendar for dates).
+    private var contextualActions: [any Action] {
+        guard contextualActionsEnabled else { return [] }
+        return displayActions.filter { action in
+            !disabledContextualIDs.contains(action.id) && action.isContextual
+        }
+    }
+
+    /// Remaining non-contextual actions shown in the standard actions island.
+    private var standardActions: [any Action] {
+        if contextualActions.isEmpty {
+            return displayActions
+        }
+        return displayActions.filter { action in
+            disabledContextualIDs.contains(action.id) || !action.isContextual
+        }
+    }
+
+    private var contextualIslandWidth: CGFloat {
+        guard !contextualActions.isEmpty else { return 0 }
+        return contextualActions.reduce(CGFloat(0)) { sum, action in
+            sum + PopupPageLayout.estimatedItemWidth(
+                for: action,
+                inlineResult: modeStore.inlineResults[action.id],
+                scale: scale,
+                presenter: presenter
+            )
+        }
+    }
+
+    private var standardMaxBudget: CGFloat {
+        if contextualActions.isEmpty {
+            return maxBarBudget
+        }
+        return max(buttonWidth * 3, maxBarBudget - contextualIslandWidth - islandGap)
+    }
+
     private var pages: [[any Action]] {
         let leadingWidth = hasCompletions ? (chevronWidth) : 0
         let trailingWidth = buttonWidth // search button
+        // Reads `inlineResults` so a preview arriving re-packs the page at the button's real width
+        // instead of overflowing the budget (the published dictionary already drives a re-render).
         return PopupPageLayout.computePages(
-            actions: displayActions,
+            actions: standardActions,
+            inlineResults: modeStore.inlineResults,
             leadingWidth: leadingWidth,
             trailingWidth: trailingWidth,
-            maxBudget: maxBarBudget,
+            maxBudget: standardMaxBudget,
             scale: scale,
             presenter: presenter
         )
@@ -265,11 +358,15 @@ public struct PopupView: View {
         max(1, pages.count)
     }
 
-    private var pagedActions: [any Action] {
+    private var pagedStandardActions: [any Action] {
         let p = pages
         let clamped = max(0, min(currentPage, p.count - 1))
         guard clamped < p.count else { return [] }
         return p[clamped]
+    }
+
+    private var visibleBarActions: [any Action] {
+        contextualActions + pagedStandardActions
     }
 
     private var hasLeftChevron: Bool { currentPage > 0 }
@@ -282,21 +379,6 @@ public struct PopupView: View {
             // region from mouse hit-testing so shadow clicks fall through to the app below.
             .padding(PopupMetrics.popupShadowInset)
             .coordinateSpace(name: "popupHoverSpace")
-            .overlay(alignment: .topLeading) {
-                GeometryReader { geo in
-                    if let tooltip = activeTooltip {
-                        PopupTooltipContainer(
-                            text: tooltip.text,
-                            targetFrame: tooltip.frame,
-                            containerWidth: geo.size.width,
-                            effectiveTheme: effectiveTheme,
-                            isDark: effectiveColorScheme == .dark
-                        )
-                        .transition(.opacity)
-                    }
-                }
-                .allowsHitTesting(false)
-            }
             .background(
                 GeometryReader { proxy in
                     Color.clear
@@ -323,21 +405,24 @@ public struct PopupView: View {
             }
             .onChange(of: modeStore.mode) { _, newMode in
                 if newMode != .actions {
-                    activeTooltip = nil
-                    tooltipTask?.cancel()
-                    isTooltipHot = false
+                    tooltipPresenter.reset { onHideTooltip?() }
                     onCancelSubBarDwell?()
                 }
             }
             .onChange(of: modeStore.isSubBarActive) { _, isActive in
                 onSubBarActiveChanged?(isActive)
             }
+            .onChange(of: totalPages) { _, count in
+                // Re-packing (e.g. a preview landing and widening a button) can shrink the page
+                // count; without this a stale `currentPage` would sit past the last page with a
+                // dead chevron and an empty-looking page.
+                if currentPage > count - 1 { currentPage = max(0, count - 1) }
+            }
             .onChange(of: isProcessingAI) { _, active in
                 onAIStateChange?(active, aiCardAboveBar)
             }
             .onDisappear {
-                activeTooltip = nil
-                tooltipTask?.cancel()
+                tooltipPresenter.reset { onHideTooltip?() }
                 cancelAITask()
                 onCancelSubBarDwell?()
             }
@@ -349,6 +434,8 @@ public struct PopupView: View {
     private var barContent: some View {
         if modeStore.mode == .content {
             resultCard
+        } else if modeStore.mode == .search {
+            searchCard
         } else {
             mainBarStyled
         }
@@ -358,16 +445,41 @@ public struct PopupView: View {
     /// of the bar (content mode). Paste/Copy are explicit user requests routed through
     /// onCardEffect (bypassing the paste-vs-copy re-decision) that both dismiss the popup; the
     /// Paste button is hidden when the target app can't paste; the back chevron collapses back to
-    /// the bar.
+    /// the bar and Esc closes the card outright.
     @ViewBuilder
     private var resultCard: some View {
         if let payload = modeStore.resultCard {
             ResultCardView(
                 payload: payload,
                 canPaste: modeStore.canPaste,
+                maxSize: modeStore.resultCardSize,
+                isUserSized: modeStore.isSurfaceUserSized,
+                isPinned: modeStore.isCardPinned,
                 onExit: { onExitContent() },
-                onPaste: { onCardEffect(.paste(payload.text)) },
-                onCopy: { onCardEffect(.copy(payload.text)) }
+                onPaste: {
+                    if let file = payload.file {
+                        onCardEffect(.saveFile(file.url))
+                    } else {
+                        onCardEffect(.paste(payload.text))
+                    }
+                },
+                onCopy: {
+                    if let file = payload.file {
+                        onCardEffect(.copyFile(file.url))
+                    } else {
+                        onCardEffect(.copy(payload.text))
+                    }
+                },
+                onSave: {
+                    if let file = payload.file {
+                        onCardEffect(.saveFile(file.url))
+                    }
+                },
+                onDrag: { phase in onCardDrag?(phase) },
+                onResize: { edge, phase in onResize?(edge, phase) },
+                onPin: { onPinCard?() },
+                onFollowUp: onFollowUp.map { run in { instruction in run(instruction) } },
+                onCancelFollowUp: onCancelFollowUp
             )
             .environment(\.colorScheme, effectiveColorScheme)
             .environment(\.popupEffectiveTheme, effectiveTheme)
@@ -377,31 +489,26 @@ public struct PopupView: View {
 
     @ViewBuilder
     private var mainBarStyled: some View {
-        let styledBar = Group {
-            if effectiveTheme == "glass" {
-                barStack
-                    .layeredGlassSurface(cornerRadius: cornerRadius, colorScheme: effectiveColorScheme)
-            } else {
-                barStack
-                    .background(opaqueBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .stroke(opaqueBorder, lineWidth: 1.0)
-                    )
-                    .shadow(color: Color.black.opacity(effectiveTheme == "light" ? 0.16 : 0.32), radius: 6, x: 0, y: 3)
+        if inCompletionMode {
+            completionHStack
+                .popupCardChrome(
+                    cornerRadius: cornerRadius,
+                    effectiveTheme: effectiveTheme,
+                    colorScheme: effectiveColorScheme
+                )
+                .environment(\.colorScheme, effectiveColorScheme)
+        } else if contextualActions.isEmpty {
+            standardIsland
+                .overlay(processingGlowBorder)
+                .environment(\.colorScheme, effectiveColorScheme)
+        } else {
+            HStack(spacing: islandGap) {
+                contextualIsland
+                standardIsland
+                    .overlay(processingGlowBorder)
             }
-        }
-
-        styledBar
             .environment(\.colorScheme, effectiveColorScheme)
-            .overlay(processingGlowBorder)
-    }
-
-    /// The themed bar content.
-    @ViewBuilder
-    private var barStack: some View {
-        unifiedHStack
+        }
     }
 
     @ViewBuilder
@@ -434,34 +541,21 @@ public struct PopupView: View {
         }
     }
 
-    // MARK: - Unified HStack Layout
-
+    /// The action-search palette: renders PopupSearchView with dedicated card chrome matching
+    /// ResultCardView in content mode.
     @ViewBuilder
-    private var unifiedHStack: some View {
-        if modeStore.mode == .search {
-            searchContent
-        } else if inCompletionMode {
-            completionHStack
-        } else {
-            actionsStack
-        }
-    }
-
-    /// The plain actions bar — the hover preview strip is gone with the canvas feature, so the bar
-    /// is just the actions HStack (paged actions + pagination + search affordance).
-    @ViewBuilder
-    private var actionsStack: some View {
-        actionsHStack
-    }
-
-    @ViewBuilder
-    private var searchContent: some View {
+    private var searchCard: some View {
         PopupSearchView(
             catalog: searchCatalog,
             context: context,
-            resultsAbove: modeStore.searchResultsAbove,
+            resultsAbove: false,
+            presenter: presenter,
+            modeStore: modeStore,
             scope: modeStore.scope,
             usageRecency: ActionUsageStore.shared.recency,
+            maxSize: modeStore.searchPaletteSize,
+            isUserSized: modeStore.isSurfaceUserSized,
+            onResize: { edge, phase in onResize?(edge, phase) },
             onResult: onResult,
             onExit: onExitSearch,
             onExitScope: {
@@ -470,12 +564,51 @@ public struct PopupView: View {
             },
             onRunAI: { actionID in
                 onActionPerformed?(actionID)
-                onExitSearch()
                 if let onRunAI {
+                    // Run first: the controller's AI flow snapshots the selection and dismisses
+                    // the popup itself. Exiting search beforehand dismissed it *for* a palette
+                    // opened straight from the hotkey (`openedDirectlyInSearch` → `hide()`),
+                    // which cleared `currentActionContext` — so the preset never ran and only
+                    // logged "Cannot run AI preset". From the bar the same exit merely returned
+                    // to the bar, which is why AI worked there and nowhere else.
                     onRunAI(actionID)
                 } else {
+                    // Preview/static fallback: no controller flow to dismiss anything, so the
+                    // palette closes itself before streaming into the card.
+                    onExitSearch()
                     guard let preset = aiManager.preset(forActionID: actionID) else { return }
                     runAIPreset(prompt: aiManager.promptForPreset(preset), title: preset.title)
+                }
+            },
+            onRunAIPrompt: { instruction, replace, includeContext in
+                if let onRunAIPrompt {
+                    // Same contract as onRunAI: the controller's flow snapshots the selection and
+                    // dismisses the popup itself, so the palette must not exit first.
+                    onRunAIPrompt(instruction, replace, includeContext)
+                } else {
+                    // Preview/static fallback: no in-place delivery here, always the card.
+                    onExitSearch()
+                    let taskPrompt = includeContext
+                        ? PaletteAIPrompt.askAITaskPrompt(for: instruction)
+                        : PaletteAIPrompt.standaloneQuestionPrompt(for: instruction)
+                    runAIPreset(prompt: taskPrompt, title: PaletteAIPrompt.toolTitle(for: instruction))
+                }
+            },
+            onSaveAIPrompt: { instruction, replace in
+                if let onSaveAIPrompt {
+                    onSaveAIPrompt(instruction, replace)
+                } else {
+                    onExitSearch()
+                    var preset = aiManager.preset(matchingPrompt: instruction)
+                        ?? aiManager.addCustomPreset(title: PaletteAIPrompt.toolTitle(for: instruction), prompt: instruction)
+                    runAIPreset(
+                        prompt: PaletteAIPrompt.saveToolTaskPrompt(for: instruction),
+                        title: preset.title,
+                        onGeneratedTitle: { cleanTitle in
+                            preset.title = cleanTitle
+                            aiManager.updatePreset(preset)
+                        }
+                    )
                 }
             },
             onActionPerformed: onActionPerformed,
@@ -483,6 +616,8 @@ public struct PopupView: View {
             onRunLoadingAction: onRunLoadingAction,
             onClickIntent: onClickIntent
         )
+        .environment(\.colorScheme, effectiveColorScheme)
+        .environment(\.popupEffectiveTheme, effectiveTheme)
     }
 
     /// The search palette's catalog: the coordinator's search catalog minus Paste-requiring
@@ -494,7 +629,7 @@ public struct PopupView: View {
 
     // MARK: - AI Helpers
 
-    private func runAIPreset(prompt: String, title: String) {
+    private func runAIPreset(prompt: String, title: String, onGeneratedTitle: ((String) -> Void)? = nil) {
         cancelAITask()
 
         let selectionText = context.selection.text
@@ -516,34 +651,37 @@ public struct PopupView: View {
 
             do {
                 let provider = aiManager.currentProvider
-                if provider.type == .browser {
-                    _ = try await provider.process(prompt: prompt, text: selectionText)
-                    guard !Task.isCancelled else { return }
-                    onResult(.success)
-                    return
-                }
 
                 var accumulated = ""
                 var hasYielded = false
+                var activeTitle = title
 
                 for try await chunk in provider.processStream(prompt: prompt, text: selectionText) {
                     guard !Task.isCancelled else { return }
                     accumulated += chunk
+                    if let generated = AIRequestSupport.extractTitleText(accumulated), !generated.isEmpty {
+                        activeTitle = generated
+                        onGeneratedTitle?(generated)
+                    }
                     let cleaned = AIRequestSupport.extractResultText(accumulated)
                     if !cleaned.isEmpty {
                         hasYielded = true
-                        onAIResult?(cleaned, false, title, true)
+                        onAIResult?(cleaned, false, activeTitle, true)
                     }
                 }
 
                 guard !Task.isCancelled else { return }
+                if let generated = AIRequestSupport.extractTitleText(accumulated), !generated.isEmpty {
+                    activeTitle = generated
+                    onGeneratedTitle?(generated)
+                }
                 let finalResponse = AIRequestSupport.extractResultText(accumulated)
                 if finalResponse.isEmpty {
                     if !hasYielded {
                         throw AIError.invalidResponse
                     }
                 } else {
-                    onAIResult?(finalResponse, false, title, false)
+                    onAIResult?(finalResponse, false, activeTitle, false)
                 }
             } catch is CancellationError {
                 // no-op
@@ -594,7 +732,24 @@ public struct PopupView: View {
 
     // MARK: - Normal Actions Bar Layout
 
-    private var actionsHStack: some View {
+    private var contextualIsland: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(contextualActions.enumerated()), id: \.element.id) { index, action in
+                let isDirectlyHovered = hoveredTarget == .action(index)
+                let isActiveParent = modeStore.activeSubGroupID == action.id && !isDirectlyHovered
+                actionButton(action: action, index: index, isHovered: isDirectlyHovered, isActiveParent: isActiveParent)
+            }
+        }
+        .fixedSize()
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .popupCardChrome(
+            cornerRadius: cornerRadius,
+            effectiveTheme: effectiveTheme,
+            colorScheme: effectiveColorScheme
+        )
+    }
+
+    private var standardIsland: some View {
         HStack(spacing: 0) {
             // Completion toggle lives on the far left; both pagination chevrons sit together on the
             // right (just before the command affordance) so next/previous are easy to reach.
@@ -605,7 +760,8 @@ public struct PopupView: View {
                 }
             }
 
-            ForEach(Array(pagedActions.enumerated()), id: \.offset) { index, action in
+            ForEach(Array(pagedStandardActions.enumerated()), id: \.element.id) { offset, action in
+                let index = contextualActions.count + offset
                 let isDirectlyHovered = hoveredTarget == .action(index)
                 let isActiveParent = modeStore.activeSubGroupID == action.id && !isDirectlyHovered
                 actionButton(action: action, index: index, isHovered: isDirectlyHovered, isActiveParent: isActiveParent)
@@ -650,6 +806,11 @@ public struct PopupView: View {
         }
         .fixedSize()
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .popupCardChrome(
+            cornerRadius: cornerRadius,
+            effectiveTheme: effectiveTheme,
+            colorScheme: effectiveColorScheme
+        )
     }
 
     // MARK: - Completion Button
@@ -701,49 +862,44 @@ public struct PopupView: View {
         let isGroup = action.gesturePolicy.singleClick == .openSubActions || action.chrome.launchesAI
         let subBarAbove = modeStore.subBarAbove
 
-        let labelView = iconView(for: action.displayIcon(using: presenter))
-            .foregroundColor(foregroundColor)
-            .padding(.horizontal, {
-                if case .text = action.displayIcon(using: presenter) { return 6.0 * scale }
-                return 0.0
-            }())
-            .frame(minWidth: buttonWidth, minHeight: barButtonHeight)
-            .background(backgroundColor)
-            .overlay(alignment: subBarAbove ? .top : .bottom) {
-                if isGroup {
-                    GroupIndicatorTriangle(pointingUp: subBarAbove)
-                        .fill(foregroundColor.opacity(0.65))
-                        .frame(width: 4.0 * scale, height: 2.5 * scale)
-                        .padding(subBarAbove ? .top : .bottom, 1.8 * scale)
-                }
+        let labelView = Group {
+            if action.chrome.isInlineResult, let resolved = modeStore.inlineResults[action.id] {
+                Text(resolved)
+                    .font(.system(size: 13 * scale, weight: .regular))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundColor(foregroundColor)
+                    .frame(maxWidth: PopupMetrics.inlineResultMaxWidth * scale)
+                    .padding(.horizontal, PopupMetrics.inlineResultHorizontalPadding * scale)
+                    .frame(minWidth: buttonWidth, minHeight: barButtonHeight)
+                    .background(backgroundColor)
+                    .transition(.opacity)
+            } else {
+                iconView(for: action.displayIcon(using: presenter))
+                    .foregroundColor(foregroundColor)
+                    .padding(.horizontal, {
+                        if case .text = action.displayIcon(using: presenter) { return 6.0 * scale }
+                        return 0.0
+                    }())
+                    .frame(minWidth: buttonWidth, minHeight: barButtonHeight)
+                    .background(backgroundColor)
+                    .overlay(alignment: subBarAbove ? .top : .bottom) {
+                        if isGroup {
+                            GroupIndicatorTriangle(pointingUp: subBarAbove)
+                                .fill(foregroundColor.opacity(0.65))
+                                .frame(width: 4.0 * scale, height: 2.5 * scale)
+                                .padding(subBarAbove ? .top : .bottom, 1.8 * scale)
+                        }
+                    }
+                    .transition(.opacity)
             }
-            .contentShape(Rectangle())
+        }
+        .contentShape(Rectangle())
 
-        switch action.gesturePolicy.singleClick {
-        case .openSubActions:
-            // Group rows open scoped search palette on click; sub-bar opens on hover dwell
-            Button {
-                onCancelSubBarDwell?()
-                let frame = hoverFrames[.action(index)]
-                onEnteredScopedSearch?(action, frame)
-            } label: {
-                labelView
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(action.displayTitle(using: presenter))
-            .popupHoverTarget(.action(index))
-            .onHover { isHovering in
-                useLocalHoverFallback(for: .action(index), isHovering: isHovering)
-                if isHovering {
-                    let frame = hoverFrames[.action(index)] ?? .zero
-                    onRequestSubBarDwell?(action, index, frame)
-                } else {
-                    onCancelSubBarDwell?()
-                }
-            }
-        case .perform:
-            if action.chrome.launchesAI {
-                // AI Tools launcher opens scoped search palette on click; sub-bar opens on hover dwell
+        Group {
+            switch action.gesturePolicy.singleClick {
+            case .openSubActions:
+                // Group rows open scoped search palette on click; sub-bar opens on hover dwell
                 Button {
                     onCancelSubBarDwell?()
                     let frame = hoverFrames[.action(index)]
@@ -751,9 +907,15 @@ public struct PopupView: View {
                 } label: {
                     labelView
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(action.displayTitle(using: presenter))
-                .popupHoverTarget(.action(index))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel({
+                        let title = action.displayTitle(using: presenter)
+                        if action.chrome.isInlineResult, let resolved = modeStore.inlineResults[action.id] {
+                            return "\(title): \(resolved)"
+                        }
+                        return title
+                    }())
+                    .popupHoverTarget(.action(index))
                 .onHover { isHovering in
                     useLocalHoverFallback(for: .action(index), isHovering: isHovering)
                     if isHovering {
@@ -763,43 +925,104 @@ public struct PopupView: View {
                         onCancelSubBarDwell?()
                     }
                 }
-            } else {
-                // Existing perform button unchanged
-                Button {
-                    onCancelSubBarDwell?()
-                    if action.chrome.showsLoading {
-                        onRunLoadingAction?(action)
-                        return
+            case .perform:
+                if action.chrome.launchesAI {
+                    // AI Tools launcher opens scoped search palette on click; sub-bar opens on hover dwell
+                    Button {
+                        onCancelSubBarDwell?()
+                        let frame = hoverFrames[.action(index)]
+                        onEnteredScopedSearch?(action, frame)
+                    } label: {
+                        labelView
                     }
-                    Task {
-                        do {
-                            onWillPerformAction?(action)
-                            onActionPerformed?(action.id)
-                            let match = action.matchInfo(for: context)
-                            let performContext = ActionContext(
-                                selection: context.selection,
-                                modifiers: context.modifiers,
-                                isSecondaryClick: onClickIntent() == .secondary,
-                                match: match
-                            )
-                            let result = try await action.perform(performContext)
-                            onResult(result)
-                        } catch {
-                            Log.presentation.error("Action failed (id \(action.id, privacy: .public)): \(error.localizedDescription)")
-                            onResult(.toast(StatusFeedback(error: error)))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(action.displayTitle(using: presenter))
+                    .popupHoverTarget(.action(index))
+                    .onHover { isHovering in
+                        useLocalHoverFallback(for: .action(index), isHovering: isHovering)
+                        if isHovering {
+                            let frame = hoverFrames[.action(index)] ?? .zero
+                            onRequestSubBarDwell?(action, index, frame)
+                        } else {
+                            onCancelSubBarDwell?()
                         }
                     }
-                } label: {
-                    labelView
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(action.displayTitle(using: presenter))
-                .popupHoverTarget(.action(index))
-                .onHover { isHovering in
-                    useLocalHoverFallback(for: .action(index), isHovering: isHovering)
+                } else {
+                    // Existing perform button unchanged
+                    Button {
+                        onCancelSubBarDwell?()
+                        // Capture the click intent once, synchronously, so the perform context and
+                        // the delivery snapshot agree and neither reads live state after an await.
+                        let clickIntent = onClickIntent()
+                        if action.chrome.showsLoading {
+                            onRunLoadingAction?(action, clickIntent)
+                            return
+                        }
+                        onWillPerformAction?(action, clickIntent)
+                        onActionPerformed?(action.id)
+                        if action.chrome.isInlineResult {
+                            if let resolved = modeStore.inlineResults[action.id] {
+                                onResult(.text(resolved))
+                                return
+                            } else if let inFlight = InlineResultEvaluator.shared.runningTask(for: action.id) {
+                                Task {
+                                    do {
+                                        if let text = await inFlight.value, !text.isEmpty {
+                                            onResult(.text(text))
+                                            return
+                                        }
+                                        let match = action.matchInfo(for: context)
+                                        let performContext = ActionContext(
+                                            selection: context.selection,
+                                            modifiers: context.modifiers,
+                                            isSecondaryClick: clickIntent == .secondary,
+                                            match: match
+                                        )
+                                        let result = try await action.perform(performContext)
+                                        onResult(result)
+                                    } catch {
+                                        Log.presentation.error("Action failed (id \(action.id, privacy: .public)): \(error.localizedDescription)")
+                                        onResult(.toast(StatusFeedback(error: error)))
+                                    }
+                                }
+                                return
+                            }
+                        }
+                        Task {
+                            do {
+                                let match = action.matchInfo(for: context)
+                                let performContext = ActionContext(
+                                    selection: context.selection,
+                                    modifiers: context.modifiers,
+                                    isSecondaryClick: clickIntent == .secondary,
+                                    match: match
+                                )
+                                let result = try await action.perform(performContext)
+                                onResult(result)
+                            } catch {
+                                Log.presentation.error("Action failed (id \(action.id, privacy: .public)): \(error.localizedDescription)")
+                                onResult(.toast(StatusFeedback(error: error)))
+                            }
+                        }
+                    } label: {
+                        labelView
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel({
+                        let title = action.displayTitle(using: presenter)
+                        if action.chrome.isInlineResult, let resolved = modeStore.inlineResults[action.id] {
+                            return "\(title): \(resolved)"
+                        }
+                        return title
+                    }())
+                    .popupHoverTarget(.action(index))
+                    .onHover { isHovering in
+                        useLocalHoverFallback(for: .action(index), isHovering: isHovering)
+                    }
                 }
             }
         }
+        .animation(PopupMetrics.inlineSpring, value: modeStore.inlineResults[action.id])
     }
 
     @ViewBuilder
@@ -825,24 +1048,6 @@ public struct PopupView: View {
         }
     }
 
-    // MARK: - Opaque Background Helpers
-
-    @ViewBuilder
-    private var opaqueBackground: some View {
-        switch effectiveTheme {
-        case "dark":
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color(red: 0.20, green: 0.20, blue: 0.22))
-        default:
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color(red: 0.91, green: 0.91, blue: 0.93))
-        }
-    }
-
-    private var opaqueBorder: Color {
-        effectiveTheme == "light" ? Color.black.opacity(0.20) : Color.white.opacity(0.22)
-    }
-
     private func updateHoveredTarget(for location: CGPoint?) {
         guard !isStatic else { return }
         let target = location.flatMap { point in
@@ -853,8 +1058,8 @@ public struct PopupView: View {
         hoveredTarget = target
         reportHoveredAction()
 
-        if case .action(let index) = target, index < pagedActions.count {
-            let action = pagedActions[index]
+        if case .action(let index) = target, index < visibleBarActions.count {
+            let action = visibleBarActions[index]
             let isGroup = action.gesturePolicy.singleClick == .openSubActions || action.chrome.launchesAI
             if isGroup {
                 let frame = hoverFrames[.action(index)] ?? .zero
@@ -874,8 +1079,8 @@ public struct PopupView: View {
             if inCompletionMode, case .completion(let index) = hoveredTarget, index < cachedCompletions.count {
                 return WordCompletionCandidateAction(word: cachedCompletions[index])
             }
-            guard case .action(let index) = hoveredTarget, index < pagedActions.count else { return nil }
-            return pagedActions[index]
+            guard case .action(let index) = hoveredTarget, index < visibleBarActions.count else { return nil }
+            return visibleBarActions[index]
         }()
         onHoveredActionChanged?(action)
     }
@@ -897,8 +1102,8 @@ public struct PopupView: View {
     private func tooltipText(for target: PopupHoverTarget) -> String? {
         switch target {
         case .action(let index):
-            guard index < pagedActions.count else { return nil }
-            return pagedActions[index].displayTitle(using: presenter)
+            guard index < visibleBarActions.count else { return nil }
+            return visibleBarActions[index].displayTitle(using: presenter)
         case .subAction:
             return nil
         case .search:
@@ -918,33 +1123,21 @@ public struct PopupView: View {
     }
 
     private func updateTooltip(for target: PopupHoverTarget?) {
-        tooltipTask?.cancel()
-        guard !isStatic, modeStore.mode == .actions, let target, let text = tooltipText(for: target), let targetFrame = hoverFrames[target] else {
-            withAnimation(.easeOut(duration: 0.1)) {
-                activeTooltip = nil
+        let resolved: (text: String, frame: CGRect)? = {
+            guard !isStatic, modeStore.mode == .actions, let target,
+                  let text = tooltipText(for: target), let targetFrame = hoverFrames[target] else { return nil }
+            return (text, targetFrame)
+        }()
+        tooltipPresenter.update(
+            text: resolved?.text,
+            show: { [onShowTooltip, effectiveTheme, isDark = effectiveColorScheme == .dark] in
+                guard let resolved else { return }
+                onShowTooltip?(resolved.text, resolved.frame, effectiveTheme, isDark)
+            },
+            hide: { [onHideTooltip] in
+                onHideTooltip?()
             }
-            tooltipTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                guard !Task.isCancelled else { return }
-                isTooltipHot = false
-            }
-            return
-        }
-
-        if isTooltipHot {
-            withAnimation(.easeInOut(duration: 0.1)) {
-                activeTooltip = (text: text, frame: targetFrame)
-            }
-        } else {
-            tooltipTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                guard !Task.isCancelled else { return }
-                isTooltipHot = true
-                withAnimation(.easeOut(duration: 0.15)) {
-                    activeTooltip = (text: text, frame: targetFrame)
-                }
-            }
-        }
+        )
     }
 
     // MARK: - Icon Helper

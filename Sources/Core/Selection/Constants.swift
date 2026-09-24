@@ -38,6 +38,8 @@ public enum Constants {
     
     // Extension System Constants
     public static let extensionsDirectory: URL = URL(fileURLWithPath: ("~/.openclip/extensions" as NSString).expandingTildeInPath)
+    public static let customIconsDirectory: URL = URL(fileURLWithPath: ("~/.openclip/custom_icons" as NSString).expandingTildeInPath)
+    public static let customIconPrefix: String = "custom:"
     public static let manifestFileName: String = "openclip.json"
     public static let legacyManifestFileName: String = "manifest.json"
     public static let storePageLimit: Int = 12
@@ -49,7 +51,7 @@ public enum Constants {
     public static let extKeyScript: String = "Script"
     
     public static let defaultScriptName: String = "script.sh"
-    public static let defaultIconSymbol: String = "wand.and.stars"
+    public static let defaultIconSymbol: String = "plus"
     public static let defaultAIIconSymbol: String = "sparkle"
     public static let customIdentifierPrefix: String = "com.custom."
     public static let titlePrefixHash: String = "# Title:"
@@ -64,6 +66,10 @@ public enum Constants {
     public static let actionTypePasteContent: String = "pasteContent"
     public static let actionTypeCopyContent: String = "copyContent"
     public static let actionTypeOpenURL: String = "openURL"
+    public static let actionTypeFile: String = "file"
+    public static let actionTypeCopyFile: String = "copyFile"
+    public static let actionTypeSaveFile: String = "saveFile"
+    public static let outputsDirectory: URL = URL(fileURLWithPath: ("~/.openclip/cache/outputs" as NSString).expandingTildeInPath)
     
     public static let envVarText: String = "OPENCLIP_TEXT"
     public static let envVarHTML: String = "OPENCLIP_HTML"
@@ -91,14 +97,11 @@ public enum Constants {
     /// accumulate in the temp directory between launches.
     public static let icsCleanupDelay: TimeInterval = 20
 
-    /// Hard deadline (seconds) for the direct accessibility text-read path. AXUIElement attribute
-    /// reads can block indefinitely when the frontmost app is unresponsive; the retrieval chain
-    /// races the read against this deadline (mirroring the pasteboard poll deadlines) so the popup
-    /// never hangs on selection retrieval.
+    /// Maximum time in seconds for one AX inspect or one Edit ▸ Copy press.
+    /// A blocked AX call must not hold an inspect-gate permit after this time.
     public static let axReadTimeout: TimeInterval = 0.5
-    /// How many selection reads may be concurrently awaited (inspect watchdog budget). Overlapping
-    /// gestures each get their own read; permits free at the read's deadline, never held by a
-    /// still-blocked AX worker past it.
+    /// Maximum number of AX inspects and Edit ▸ Copy presses that can run at the same time.
+    /// A permit is released at the deadline, not when a blocked AX call returns.
     public static let axMaxConcurrentInspects: Int = 4
 
     /// Hard deadline (seconds) for the Paste-availability probe's AX menu-bar walk. Mirrors
@@ -106,6 +109,10 @@ public enum Constants {
     /// unresponsive target app can never hang delivery. On timeout the probe returns "unknown",
     /// which the delivery decision treats as cannot-paste (copy).
     public static let pasteProbeTimeout: TimeInterval = 0.4
+    /// Maximum number of paste-availability probes that can run at the same time.
+    /// The probe has its own limit because a hotkey can start a probe and a selection inspect together.
+    /// A permit is released at `pasteProbeTimeout`. A blocked AX worker does not keep the permit (issue #37).
+    public static let pasteProbeMaxConcurrent: Int = 4
 
     /// Hard deadline (seconds) for the browser-script retrieval bridge to return a selection.
     public static let browserScriptTimeout: TimeInterval = 1.0
@@ -125,6 +132,9 @@ public enum Constants {
 
     /// Throttle interval (seconds) for keyboard selection gestures (Cmd+A, Shift+arrow) to prevent rapid repeated retrievals while holding keys.
     public static let keyboardSelectionDebounceInterval: TimeInterval = 0.15
+
+    /// Maximum age (seconds) for a monitored selection before it is treated as stale.
+    public static let selectionMaxAge: TimeInterval = 30.0
 
     /// Default duration (seconds) of holding the mouse button down to trigger the popup.
     public static let defaultMouseHoldDuration: TimeInterval = 0.3

@@ -1,6 +1,6 @@
 # ADR 0002 — Isolate the Codex CLI invocation
 
-- **Status:** Accepted
+- **Status:** Superseded by [#29](https://github.com/sonhyrd/openclip/issues/29) — the fork adopted upstream's `CLIProvider` (`Sources/OpenClip/AI/Providers/CLIProvider.swift`); only the empty private cwd survives.
 - **Date:** 2026-09-06
 - **Context:** [#18](https://github.com/sonhyrd/openclip/issues/18) (ask), [#19](https://github.com/sonhyrd/openclip/issues/19) (spec), [#21](https://github.com/sonhyrd/openclip/issues/21), [#23](https://github.com/sonhyrd/openclip/issues/23), [#24](https://github.com/sonhyrd/openclip/issues/24), [#25](https://github.com/sonhyrd/openclip/issues/25) (this record)
 - **Shipped in:** [`Sources/Core/AI/CodexCLI.swift`](../../Sources/Core/AI/CodexCLI.swift), [`Sources/OpenClip/AI/Providers/CodexCLIProvider.swift`](../../Sources/OpenClip/AI/Providers/CodexCLIProvider.swift), [`Sources/OpenClip/AI/AIServiceManager.swift`](../../Sources/OpenClip/AI/AIServiceManager.swift)

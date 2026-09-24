@@ -15,7 +15,7 @@ Whenever a log message is emitted via `Log.<category>.<level>(...)`, it is forma
    - Zero CPU polling overhead (eliminates background `OSLogStore` polling).
 3. **Sink 3: Rotating File Appender (`RotatingFileLogSink`)**
    - Automatically writes log entries to `~/Library/Logs/OpenClip/openclip.log`.
-   - Thread-safe writes via a serial background queue (`com.openclip.log.fileappender`, QoS `.utility`).
+   - Formats the timestamp and writes the line on a serial queue (`com.openclip.log.fileappender`, QoS `.utility`); `record` does no formatting on the caller's thread.
    - Rotates log files when reaching 5MB, maintaining up to 3 backup archives (`openclip.1.log`, `openclip.2.log`, `openclip.3.log`).
 
 ```text
@@ -60,7 +60,7 @@ Each subsystem owns a dedicated `LogChannel` property on `Log` under the `com.op
 | `coordinator`    | action coordination / enablement evaluation                 |
 | `shell`          | `ShellProcessRunner` (subprocess watchdog, timeout)         |
 | `js`             | `OpenClipJSHost` runtime                                    |
-| `selection`      | `SelectionRetrievalCoordinator` + strategies / `MacSelectionMonitor` (gate decisions, mode routing, AX + pasteboard + keyboard retrieval) |
+| `selection`      | `SelectionRetrievalCoordinator` + strategies / `MacSelectionMonitor` (gate decisions, mode routing, AX + pasteboard + keyboard retrieval); `PasteAvailabilityProbe` limit and time-limit results |
 | `extensions`     | `ExtensionManager`, remote installer, extension store/onboarding install & uninstall, **manifest decode/validation rejections** |
 | `ai`             | AI providers and preset persistence                         |
 | `permissions`    | TCC / accessibility permission management                   |
@@ -84,10 +84,6 @@ Each subsystem owns a dedicated `LogChannel` property on `Log` under the `com.op
   default-private. Only ids and URLs are marked `privacy: .public` (e.g.
   `\(action.id, privacy: .public)`). Do not mark user text `.public`. JS script `console.log` arguments
   are redacted into structural metadata (`<string len=N>`, `<Object keys=[...]>`) before logging.
-  One named exception: the resolved `claude` binary path in `AIServiceManager` is `.public`. A
-  binary that will not resolve is this provider's number-one failure mode, a redacted path
-  defeats the whole diagnostic, and the same path is already shown to the user in
-  Preferences → AI. It is an exception on the record, not a precedent for paths generally.
 - **No hot-path logging:** never log in per-mouse-move hover updates or high-frequency view bodies.
 
 ## Viewing & Filtering Workflows

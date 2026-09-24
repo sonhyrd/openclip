@@ -2,7 +2,8 @@
 // OpenClip
 //
 // The About preferences tab: app identity, version, software updates, links, and diagnostics.
-// Split out of PreferencesView.swift.
+// Styled with inset SettingsCards (outside headers, rounded cards, inset hairline dividers).
+
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -11,7 +12,6 @@ import Core
 @MainActor
 struct AboutTab: View {
     @State private var isExporting = false
-    @State private var exportError: String?
     @ObservedObject private var updateManager = AppUpdateManager.shared
 
     private var version: String {
@@ -19,247 +19,256 @@ struct AboutTab: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 16)
+        ScrollView {
+            VStack(spacing: 20) {
+                // Identity block
+                identityBlock
 
-            // ── App Identity ──
-            VStack(spacing: 6) {
-                Image(nsImage: AppIcon.image)
-                    .resizable()
-                    .frame(width: 76, height: 76)
-                    .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
-                    .padding(.bottom, 2)
-
-                Text("OpenClip")
-                    .font(.system(size: 20, weight: .bold))
-
-                Text("Version \(version)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                Text("Instant actions for selected text on macOS")
-                    .font(.system(size: 13))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: 320)
-                    .padding(.top, 2)
-            }
-
-            // ── Updates Card ──
-            VStack(alignment: .leading, spacing: 6) {
-                if let newVersion = updateManager.availableUpdateVersion {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.tint)
-                            Text(updateManager.isUpdateStagedForQuitInstall
-                                 ? String(localized: "Update Ready: v\(newVersion)")
-                                 : String(localized: "Update Available: v\(newVersion)"))
-                                .font(.system(size: 12, weight: .semibold))
-                            Spacer()
-                            Button {
-                                updateManager.installUpdateNow()
-                            } label: {
-                                Text(String(localized: "Update Now"))
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-
-                            Button {
-                                updateManager.installUpdateOnQuit()
-                            } label: {
-                                Text(String(localized: "Update on Quit"))
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
+                // Software updates
+                SettingsCard("Software Updates") {
+                    if let newVersion = updateManager.availableUpdateVersion {
+                        updateAvailableRow(version: newVersion)
+                        SettingsDivider()
 
                         if let notes = updateManager.availableUpdateReleaseNotes, !notes.isEmpty {
-                            DisclosureGroup(String(localized: "Release Notes")) {
+                            DisclosureGroup("Release Notes") {
                                 ScrollView {
-                                    Text(notes)
-                                        .font(.system(size: 11))
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(LocalizedStringKey(notes))
+                                        .font(.callout)
                                         .textSelection(.enabled)
-                                        .padding(6)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 4)
                                 }
-                                .frame(maxHeight: 100)
-                                .background(Color(NSColor.textBackgroundColor).opacity(0.5))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .frame(maxHeight: 140)
                             }
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            SettingsDivider()
                         }
                     }
+
+                    SettingsToggleRow(
+                        title: "Automatically Download Updates",
+                        systemImage: "arrow.down.circle",
+                        isOn: $updateManager.automaticallyDownloadsUpdates
+                    )
+
+                    SettingsDivider()
+
+                    SettingsToggleRow(
+                        title: "Notify on Update",
+                        systemImage: "bell.badge",
+                        isOn: $updateManager.notifyOnUpdate
+                    )
+
+                    SettingsDivider()
+
+                    SettingsRow(
+                        title: "Check for Updates",
+                        subtitle: updateChannelSubtitle ?? lastCheckedSubtitle,
+                        systemImage: "arrow.triangle.2.circlepath"
+                    ) {
+                        HStack(spacing: 10) {
+                            Picker("", selection: $updateManager.updateChannel) {
+                                Text("Stable").tag(UpdateChannel.stable)
+                                Text("Beta").tag(UpdateChannel.beta)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 150)
+                            .accessibilityLabel("Update Channel")
+
+                            Button {
+                                updateManager.checkForUpdates()
+                            } label: {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(SettingsDesignTokens.primaryText)
+                                    .frame(width: 24, height: 24)
+                            }
+                            .buttonStyle(.plain)
+                            .settingsGlassCircle()
+                            .contentShape(Circle())
+                            .disabled(!updateManager.canCheckForUpdates)
+                            .accessibilityLabel("Check Now")
+                            .help("Check Now")
+                        }
+                    }
+                }
+
+                // Links
+                SettingsCard("Links") {
+                    linkRow("Website", systemImage: "globe", url: "https://www.getopenclip.app")
+                    SettingsDivider()
+                    linkRow("Documentation", systemImage: "book", url: "https://www.getopenclip.app/docs")
+                    SettingsDivider()
+                    linkRow("Support", systemImage: "questionmark.circle", url: "https://www.getopenclip.app/support")
+                    SettingsDivider()
+                    linkRow("GitHub", systemImage: "chevron.left.forwardslash.chevron.right", url: "https://github.com/ganeshmshetty/openclip")
+                    SettingsDivider()
+                    linkRow("Report an Issue", systemImage: "ant", url: "https://github.com/ganeshmshetty/openclip/issues")
+                }
+
+                // Diagnostics
+                SettingsCard("Diagnostics") {
+                    SettingsRow(
+                        title: "Logs",
+                        subtitle: "Attach these when reporting a problem.",
+                        systemImage: "doc.text"
+                    ) {
+                        HStack(spacing: 10) {
+                            Button(isExporting ? String(localized: "Exporting…") : String(localized: "Export…")) {
+                                exportLogs()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(SettingsDesignTokens.primaryText)
+                            .padding(.horizontal, 10)
+                            .frame(height: 24)
+                            .settingsGlassCapsule()
+                            .contentShape(Capsule())
+                            .disabled(isExporting)
+
+                            Button(String(localized: "Reveal")) {
+                                LogExporter.showLogsInFinder()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(SettingsDesignTokens.primaryText)
+                            .padding(.horizontal, 10)
+                            .frame(height: 24)
+                            .settingsGlassCapsule()
+                            .contentShape(Capsule())
+                        }
+                    }
+                }
+
+                Text("Open source under MIT License")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 4)
+                    .padding(.bottom, 12)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    // MARK: - Pieces
+
+    private var identityBlock: some View {
+        VStack(spacing: 6) {
+            Image(nsImage: AppIcon.image)
+                .resizable()
+                .frame(width: 72, height: 72)
+
+            Text("OpenClip")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(SettingsDesignTokens.primaryText)
+
+            Text("Version \(version)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Text("Instant actions for selected text on macOS")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                openURL("https://www.getopenclip.app/support")
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "heart.fill")
+                        .font(.caption.weight(.semibold))
+                    Text(String(localized: "Donate"))
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption2.weight(.semibold))
+                }
+            }
+            .buttonStyle(.link)
+            .font(.callout)
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+    }
+
+    private func updateAvailableRow(version newVersion: String) -> some View {
+        SettingsRow(
+            title: updateManager.isUpdateStagedForQuitInstall
+                ? "Update Ready"
+                : "Update Available",
+            subtitle: LocalizedStringKey("Version \(newVersion)"),
+            systemImage: "sparkles"
+        ) {
+            HStack(spacing: 10) {
+                if #available(macOS 26.0, *) {
+                    Button(String(localized: "Update Now")) {
+                        updateManager.installUpdateNow()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(SettingsDesignTokens.glassButtonBlue)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.accentColor.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
+                    .frame(height: 24)
+                    .background(.ultraThinMaterial, in: .capsule)
+                    .glassEffect(.regular.tint(SettingsDesignTokens.glassButtonBlue.opacity(0.18)).interactive(), in: .capsule)
+                    .contentShape(Capsule())
 
-                // Row 1: Automatically Download Updates
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 13))
-                        .foregroundColor(updateManager.automaticallyDownloadsUpdates ? .accentColor : .secondary)
-                        .frame(width: 18, alignment: .center)
-
-                    Text(String(localized: "Automatically Download Updates"))
-                        .font(.system(size: 12))
-
-                    Spacer()
-
-                    Toggle("", isOn: $updateManager.automaticallyDownloadsUpdates)
-                        .labelsHidden()
-                        .controlSize(.mini)
-                        .accessibilityLabel(String(localized: "Automatically Download Updates"))
-                }
-                .padding(.vertical, 2)
-
-                // Row 2: Notify on Update
-                HStack(spacing: 8) {
-                    Image(systemName: "bell.badge")
-                        .font(.system(size: 13))
-                        .foregroundColor(updateManager.notifyOnUpdate ? .accentColor : .secondary)
-                        .frame(width: 18, alignment: .center)
-
-                    Text(String(localized: "Notify on Update"))
-                        .font(.system(size: 12))
-
-                    Spacer()
-
-                    Toggle("", isOn: $updateManager.notifyOnUpdate)
-                        .labelsHidden()
-                        .controlSize(.mini)
-                        .accessibilityLabel(String(localized: "Notify on Update"))
-                }
-                .padding(.vertical, 2)
-
-                Divider()
-                    .padding(.vertical, 2)
-
-                // Row 3: Check for Updates Status & Button
-                HStack(spacing: 8) {
-                    if let lastCheck = updateManager.lastUpdateCheckDate {
-                        Text(String(localized: "Last checked: \(Self.shortTimeAgo(lastCheck))"))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+                    Button(String(localized: "On Quit")) {
+                        updateManager.installUpdateOnQuit()
                     }
-
-                    Spacer()
-
-                    Button {
-                        updateManager.checkForUpdates()
-                    } label: {
-                        Text(String(localized: "Check for Updates"))
-                            .font(.system(size: 11, weight: .medium))
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(SettingsDesignTokens.primaryText)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .settingsGlassCapsule()
+                    .contentShape(Capsule())
+                } else {
+                    Button("Update Now") {
+                        updateManager.installUpdateNow()
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(!updateManager.canCheckForUpdates)
+                    .buttonStyle(.borderedProminent)
+
+                    Button("On Quit") {
+                        updateManager.installUpdateOnQuit()
+                    }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.7))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            .padding(.top, 20)
-
-            // ── Links & Diagnostics ──
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    actionButton("Website", icon: "globe") {
-                        openURL("https://www.getopenclip.app")
-                    }
-                    actionButton("GitHub", icon: "chevron.left.forwardslash.chevron.right") {
-                        openURL("https://github.com/ganeshmshetty/openclip")
-                    }
-                    actionButton("Issues", icon: "ant") {
-                        openURL("https://github.com/ganeshmshetty/openclip/issues")
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        exportLogs()
-                    } label: {
-                        HStack(spacing: 5) {
-                            if isExporting {
-                                ProgressView()
-                                    .controlSize(.mini)
-                            } else {
-                                Image(systemName: "square.and.arrow.up")
-                                    .font(.system(size: 11))
-                            }
-                            Text(isExporting ? String(localized: "Exporting…") : String(localized: "Export Logs"))
-                                .font(.system(size: 12))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(isExporting)
-
-                    Button {
-                        LogExporter.showLogsInFinder()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "folder")
-                                .font(.system(size: 11))
-                            Text("Reveal Log File")
-                                .font(.system(size: 12))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-            .padding(.top, 14)
-
-            // ── Footer ──
-            Text("Open source under MIT License")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .padding(.top, 16)
-
-            Spacer(minLength: 24)
         }
-        .frame(maxWidth: 380)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.horizontal, 24)
-        .alert("Export Logs Failed", isPresented: Binding(
-            get: { exportError != nil },
-            set: { if !$0 { exportError = nil } }
-        )) {
-            Button("OK", role: .cancel) {
-                exportError = nil
+    }
+
+    private var lastCheckedSubtitle: LocalizedStringKey? {
+        guard let lastCheck = updateManager.lastUpdateCheckDate else { return nil }
+        return LocalizedStringKey("Last checked \(Self.shortTimeAgo(lastCheck))")
+    }
+
+    private var updateChannelSubtitle: LocalizedStringKey? {
+        updateManager.updateChannel == .beta
+            ? "Beta builds include features that are still being tested."
+            : nil
+    }
+
+    private func linkRow(_ title: LocalizedStringKey, systemImage: String, url: String) -> some View {
+        Button {
+            openURL(url)
+        } label: {
+            SettingsRow(title: title, systemImage: systemImage) {
+                Image(systemName: "arrow.up.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
-        } message: {
-            Text(exportError ?? "An unknown error occurred.")
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Helpers
-
-    private func actionButton(_ title: LocalizedStringKey, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 11))
-                Text(title)
-                    .font(.system(size: 12))
-            }
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-    }
 
     private func openURL(_ string: String) {
         if let url = URL(string: string) {
@@ -267,7 +276,6 @@ struct AboutTab: View {
         }
     }
 
-    /// Returns a short, static "time ago" string that doesn't live-tick.
     private static func shortTimeAgo(_ date: Date) -> String {
         let seconds = Int(-date.timeIntervalSinceNow)
         if seconds < 60 { return String(localized: "just now") }
@@ -305,7 +313,10 @@ struct AboutTab: View {
                     try fileManager.copyItem(at: tempZipURL, to: destinationURL)
                 }
             } catch {
-                exportError = error.localizedDescription
+                SettingsRouter.shared.notifyError(
+                    title: String(localized: "Export Logs Failed"),
+                    message: error.localizedDescription
+                )
             }
         }
     }

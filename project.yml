@@ -30,6 +30,8 @@ targets:
             CFBundleURLSchemes:
               - openclip
         LSUIElement: true
+        NSHumanReadableCopyright: "Copyright © 2026 Ganesh M and OpenClip Contributors. MIT licensed."
+        NSAppleEventsUsageDescription: "OpenClip needs to control other apps to run your AppleScript actions and to paste results back into the app you were using."
         SUFeedURL: https://github.com/sonhyrd/openclip/releases/latest/download/appcast.xml
         SUPublicEDKey: TwC/Al/mC9ghwPNoGNt0nYHkgvmCcYH6lVhMIU+JPxI=
         SUScheduledCheckInterval: 86400
@@ -49,6 +51,9 @@ targets:
         INFOPLIST_KEY_CFBundleShortVersionString: $(MARKETING_VERSION)
         INFOPLIST_KEY_CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Sources/OpenClip/OpenClip.entitlements
+        # Ad-hoc is the default so a clone builds and runs with no Apple Developer account.
+        # scripts/sign_artifact.sh overrides the identity for signed/notarized builds.
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
@@ -59,6 +64,7 @@ targets:
         LOCALIZATION_PREFERS_STRING_CATALOGS: YES
     dependencies:
       - target: Core
+      - package: OpenSelection
       - package: KeyboardShortcuts
       - package: SDWebImageSwiftUI
       - package: SDWebImageSVGCoder
@@ -75,10 +81,14 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
     dependencies:
       - target: OpenClip
+      - package: OpenSelection
 packages:
+  OpenSelection:
+    url: https://github.com/ganeshmshetty/OpenSelection
+    from: 0.2.4
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
-    from: 2.0.0
+    from: 3.1.0
   SDWebImageSwiftUI:
     url: https://github.com/SDWebImage/SDWebImageSwiftUI
     from: 3.0.0

@@ -15,6 +15,9 @@
 // expanded `ScriptJSONOutput` DTO, and the shared JSON→ActionResult mapper. Pure Foundation — no
 // AppKit/SwiftUI.
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Thread-safe boolean flag guarded by an NSLock.
 public final class AtomicFlag: @unchecked Sendable {
@@ -193,18 +196,155 @@ struct ScriptJSONOutput: Decodable {
     let keepVisible: Bool?
     let html: String?
     let rtf: String?
+    let path: String?
+    let url: String?
+    let data: String?
+    let filename: String?
+    let mimeType: String?
+    let action: String?
 }
 
 /// Maps shell stdout JSON into an `ActionResult` (plan §6 protocol). Returns nil when the output
 /// does not decode as a `ScriptJSONOutput`, so callers fall through to plain-text handling; a
 /// decoded but unknown `type` maps to `.success` (the current default path).
-enum ShellResultMapper {
-    static func actionResult(from stdout: String, actionID: String) -> ActionResult? {
+public enum ShellResultMapper {
+    /// Decodes structured script output, returning `nil` when stdout is not recognized JSON.
+    public static func actionResult(from stdout: String, actionID: String) -> ActionResult? {
         guard let data = stdout.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(ScriptJSONOutput.self, from: data) else {
             return nil
         }
         return map(decoded, actionID: actionID)
+    }
+
+    /// Auto-detects whether plain-text stdout is a path to an existing regular file on disk.
+    public static func detectFileResult(from stdout: String) -> ActionResult? {
+        let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\n"), !trimmed.contains("\r") else {
+            return nil
+        }
+        guard trimmed.hasPrefix("/") || trimmed.hasPrefix("~") || trimmed.hasPrefix("file://") else {
+            return nil
+        }
+        guard let url = parseExistingFileURL(from: trimmed) else {
+            return nil
+        }
+        return .file(FileOutputPayload(url: url, filename: url.lastPathComponent, isTemporary: false))
+    }
+
+    /// Converts an absolute, tilde-prefixed, or file-URL path into a local file URL.
+    public static func parseFileURL(from rawPath: String) -> URL? {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("file://") {
+            if let url = URL(string: trimmed), url.isFileURL {
+                return url
+            }
+            let stripped = String(trimmed.dropFirst("file://".count))
+            let expanded = (stripped as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded)
+        }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded)
+    }
+
+    /// Checks that the raw path exists as a regular file on disk.
+    public static func parseExistingFileURL(from rawPath: String) -> URL? {
+        guard let url = parseFileURL(from: rawPath) else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+            return nil
+        }
+        return url
+    }
+
+    /// Writes decoded action data to the output cache using a safe generated or supplied filename.
+    public static func writeTemporaryOutput(data: Data, filename: String?, mimeType: String?) -> URL? {
+        let dir = Constants.outputsDirectory
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        let resolvedFilename: String
+        if let rawName = filename?.trimmingCharacters(in: .whitespacesAndNewlines), !rawName.isEmpty {
+            let sanitized = (rawName as NSString).lastPathComponent
+            if sanitized.isEmpty || sanitized == "." || sanitized == ".." {
+                let ext = extensionForMimeType(mimeType) ?? "bin"
+                resolvedFilename = "output-\(UUID().uuidString).\(ext)"
+            } else {
+                resolvedFilename = sanitized
+            }
+        } else {
+            let ext = extensionForMimeType(mimeType) ?? "bin"
+            resolvedFilename = "output-\(UUID().uuidString).\(ext)"
+        }
+        let fileURL = dir.appendingPathComponent(resolvedFilename)
+        guard Constants.isPathSafe(destinationURL: fileURL, baseDirectory: dir) else {
+            return nil
+        }
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            return fileURL
+        } catch {
+            return nil
+        }
+    }
+
+    /// Returns the preferred filename extension for a supported MIME type.
+    private static func extensionForMimeType(_ mime: String?) -> String? {
+        guard let mime = mime?.lowercased() else { return nil }
+        switch mime {
+        case "image/png": return "png"
+        case "image/jpeg", "image/jpg": return "jpg"
+        case "image/gif": return "gif"
+        case "image/webp": return "webp"
+        case "image/svg+xml": return "svg"
+        case "application/pdf": return "pdf"
+        case "application/json": return "json"
+        case "text/plain": return "txt"
+        case "audio/mpeg", "audio/mp3": return "mp3"
+        case "video/mp4": return "mp4"
+        case "application/zip": return "zip"
+        default: return nil
+        }
+    }
+
+    /// Resolves either embedded base64 data or a referenced file from structured output.
+    private static func resolveFileURL(from output: ScriptJSONOutput) -> URL? {
+        if let base64String = output.data, let data = Data(base64Encoded: base64String) {
+            return writeTemporaryOutput(data: data, filename: output.filename, mimeType: output.mimeType)
+        }
+        let rawPath = output.path ?? output.url ?? output.value
+        guard let rawPath = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines), !rawPath.isEmpty else {
+            return nil
+        }
+        return parseExistingFileURL(from: rawPath)
+    }
+
+    /// Maps structured file output to preview, copy, or save semantics.
+    private static func mapFileOutput(_ output: ScriptJSONOutput) -> ActionResult {
+        guard let targetURL = resolveFileURL(from: output) else {
+            return .toast(StatusFeedback(message: String(localized: "File not found"), style: .error))
+        }
+        let isTemp = output.data != nil
+        let payload = FileOutputPayload(
+            url: targetURL,
+            filename: output.filename ?? targetURL.lastPathComponent,
+            mimeType: output.mimeType,
+            isTemporary: isTemp
+        )
+        if let action = output.action?.lowercased() {
+            switch action {
+            case "copy", "copyfile":
+                return .copyFile(targetURL)
+            case "save", "savefile":
+                return .saveFile(targetURL)
+            default:
+                return .file(payload)
+            }
+        }
+        return .file(payload)
     }
 
     private static func mapModifiers(_ rawModifiers: [String]?) -> [KeyPressSpec.KeyModifier] {
@@ -220,6 +360,7 @@ enum ShellResultMapper {
         }
     }
 
+    /// Converts a decoded script result into the corresponding domain action result.
     private static func map(_ output: ScriptJSONOutput, actionID: String) -> ActionResult {
         switch output.type {
         case Constants.actionTypePaste:
@@ -239,6 +380,18 @@ enum ShellResultMapper {
         case Constants.actionTypeOpenURL, "url":
             guard let value = output.value, let url = URL(string: value) else { return .success }
             return .openURL(url)
+        case Constants.actionTypeFile, "file":
+            return mapFileOutput(output)
+        case Constants.actionTypeCopyFile, "copyFile", "copy-file":
+            if let targetURL = resolveFileURL(from: output) {
+                return .copyFile(targetURL)
+            }
+            return .toast(StatusFeedback(message: String(localized: "File not found"), style: .error))
+        case Constants.actionTypeSaveFile, "saveFile", "save-file":
+            if let targetURL = resolveFileURL(from: output) {
+                return .saveFile(targetURL)
+            }
+            return .toast(StatusFeedback(message: String(localized: "File not found"), style: .error))
         case "keyPress", "keypress":
             guard let key = output.key, !key.isEmpty else { return .success }
             let modifiers = mapModifiers(output.modifiers)
@@ -293,8 +446,7 @@ enum ShellResultMapper {
 
 /// Runs a subprocess to completion (or to the watchdog timeout) and returns its captured output.
 /// Throws on non-zero exit (stderr text as the message) and on timeout — the unified stricter
-/// error policy both shell runtimes adopt. `runCapturingExit` is the same execution — one watchdog,
-/// one process-group kill, one pair of pipe accumulators — reporting the exit status as a value.
+/// error policy both shell runtimes adopt.
 public enum ShellProcessRunner {
     public struct Invocation: Sendable {
         public var executableURL: URL
@@ -305,26 +457,19 @@ public enum ShellProcessRunner {
         /// Runtime budget before the watchdog kills the subprocess. Defaults to
         /// `Constants.scriptTimeout` (60 s); tests override with a short value.
         public var timeout: TimeInterval?
-        /// Working directory for the child. nil inherits OpenClip's own — which for a
-        /// Finder-launched app is `/`. A child that walks its working directory (Claude Code
-        /// indexes it at startup) will then crawl the whole disk, so callers that spawn such a
-        /// tool should hand it somewhere small and private.
-        public var currentDirectoryURL: URL?
 
         public init(
             executableURL: URL,
             arguments: [String],
             environment: [String: String] = [:],
             stdinText: String? = nil,
-            timeout: TimeInterval? = nil,
-            currentDirectoryURL: URL? = nil
+            timeout: TimeInterval? = nil
         ) {
             self.executableURL = executableURL
             self.arguments = arguments
             self.environment = environment
             self.stdinText = stdinText
             self.timeout = timeout
-            self.currentDirectoryURL = currentDirectoryURL
         }
     }
 
@@ -337,12 +482,23 @@ public enum ShellProcessRunner {
     public static func terminateProcessGroup(_ process: Process, fallbackDelay: TimeInterval = 0.5) {
         let pid = process.processIdentifier
         guard pid > 0 else { return }
+
+        // Snapshot the tree while the parent still runs. After terminate(), grandchildren that
+        // left the group reparent to launchd and a later ppid walk cannot find them.
+        let descendants = descendantSnapshots(of: pid)
+
         process.terminate()
         if getpgid(pid) == pid {
             kill(-pid, SIGTERM)
         }
+        for snapshot in descendants {
+            guard isProcessPresent(snapshot.pid),
+                  processStartTime(pid: snapshot.pid) == snapshot.startTime else { continue }
+            kill(snapshot.pid, SIGTERM)
+        }
+
         DispatchQueue.global().asyncAfter(deadline: .now() + fallbackDelay) {
-            if process.isRunning {
+            if process.isRunning, process.processIdentifier == pid {
                 process.terminate()
                 if getpgid(pid) == pid {
                     kill(-pid, SIGKILL)
@@ -350,17 +506,86 @@ public enum ShellProcessRunner {
                     kill(pid, SIGKILL)
                 }
             }
+            for snapshot in descendants {
+                guard isProcessPresent(snapshot.pid),
+                      processStartTime(pid: snapshot.pid) == snapshot.startTime else { continue }
+                kill(snapshot.pid, SIGKILL)
+            }
         }
     }
 
-    /// Runs the subprocess and returns its output for **any** exit status. Throws only when the
-    /// process fails to launch, when the watchdog timeout fires, and when the calling Task is
-    /// cancelled — so a caller that needs the exit status and stderr as values (rather than
-    /// flattened into one error) can have them.
-    ///
-    /// This is the single execution path: `run` is a thin non-zero-exit-throwing wrapper over it,
-    /// so interactive cancellation and the shared watchdog budget apply identically to both.
-    public static func runCapturingExit(_ invocation: Invocation) async throws -> Output {
+    private struct ProcessStartTime: Equatable, Sendable {
+        let sec: UInt64
+        let usec: UInt64
+    }
+
+    private struct DescendantSnapshot: Sendable {
+        let pid: pid_t
+        let startTime: ProcessStartTime
+    }
+
+    private static func descendantSnapshots(of root: pid_t) -> [DescendantSnapshot] {
+        descendantProcessIDs(of: root).compactMap { child in
+            guard let startTime = processStartTime(pid: child) else { return nil }
+            return DescendantSnapshot(pid: child, startTime: startTime)
+        }
+    }
+
+    private static func descendantProcessIDs(of root: pid_t) -> [pid_t] {
+        let selfPid = getpid()
+        var ids: [pid_t] = []
+        var queue: [pid_t] = [root]
+        var seen: Set<pid_t> = [root]
+        var index = 0
+        while index < queue.count {
+            let parent = queue[index]
+            index += 1
+            for child in childProcessIDs(of: parent) {
+                guard child > 1, child != selfPid, !seen.contains(child) else { continue }
+                seen.insert(child)
+                ids.append(child)
+                queue.append(child)
+            }
+        }
+        return ids
+    }
+
+    /// Direct children of one pid, so the walk stays inside our own subtree instead of building a
+    /// parent map over every process on the system. A nil-buffer call reports a pid count, which can
+    /// grow before the second call, so the buffer keeps slack; a probe of 0 is also read once,
+    /// because missing a descendant here means a hung grandchild survives the watchdog.
+    private static func childProcessIDs(of parent: pid_t) -> [pid_t] {
+        var capacity = Int(proc_listchildpids(parent, nil, 0))
+        if capacity <= 0 {
+            capacity = 8
+        }
+        capacity += 16
+        var pids = [pid_t](repeating: 0, count: capacity)
+        let written = pids.withUnsafeMutableBufferPointer { buffer in
+            proc_listchildpids(
+                parent,
+                buffer.baseAddress,
+                Int32(buffer.count * MemoryLayout<pid_t>.stride)
+            )
+        }
+        guard written > 0 else { return [] }
+        return pids.prefix(Int(written)).filter { $0 > 0 }
+    }
+
+    private static func processStartTime(pid: pid_t) -> ProcessStartTime? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.stride)
+        let result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
+        guard result == size else { return nil }
+        return ProcessStartTime(sec: info.pbi_start_tvsec, usec: info.pbi_start_tvusec)
+    }
+
+    private static func isProcessPresent(_ pid: pid_t) -> Bool {
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    public static func run(_ invocation: Invocation) async throws -> Output {
         try Task.checkCancellation()
 
         let processBox = ProcessBox()
@@ -375,9 +600,6 @@ public enum ShellProcessRunner {
                 process.executableURL = invocation.executableURL
                 process.arguments = invocation.arguments
                 process.environment = invocation.environment
-                if let cwd = invocation.currentDirectoryURL {
-                    process.currentDirectoryURL = cwd
-                }
 
                 let stdOutPipe = Pipe()
                 process.standardOutput = stdOutPipe
@@ -401,12 +623,6 @@ public enum ShellProcessRunner {
                 }
 
                 try process.run()
-
-                // Move the child into its own process group so a watchdog kill can signal the whole tree
-                // (the script plus any grandchildren it spawned) rather than only the direct child. The
-                // child's pid becomes the group id; a failed setpgid is tolerated — the group signal just
-                // no-ops below.
-                setpgid(process.processIdentifier, process.processIdentifier)
                 processBox.set(process)
 
                 if processBox.isCancelled {
@@ -440,13 +656,6 @@ public enum ShellProcessRunner {
 
                 process.waitUntilExit()
 
-                // Drain the pipes BEFORE reading `data` below. The `defer` above also calls these,
-                // but a defer runs after the return expression is evaluated, which would read the
-                // accumulators while a tail of output was still unread.
-                watchdog?.cancel()
-                outReader.finish()
-                errReader.finish()
-
                 if processBox.isCancelled {
                     throw CancellationError()
                 }
@@ -457,29 +666,34 @@ public enum ShellProcessRunner {
                                   userInfo: [NSLocalizedDescriptionKey: "Script timed out after \(Int(budget)) seconds"])
                 }
 
+                // Drain both pipes before the buffers are read. `waitUntilExit()` returns when the
+                // direct child exits, and the readability handlers can still hold unread output — or
+                // not have run at all. The `defer` above only fires after the return value is built,
+                // so reading the buffers first can truncate or lose the script's output entirely.
+                outReader.finish()
+                errReader.finish()
+
+                let outData = outReader.data
+                let errData = errReader.data
+
+                if process.terminationStatus != 0 {
+                    let errText = String(data: errData, encoding: .utf8) ?? ""
+                    let errMsg = errText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? "Script exited with code \(process.terminationStatus)"
+                        : errText
+                    throw NSError(domain: Constants.actionErrorDomain,
+                                  code: Int(process.terminationStatus),
+                                  userInfo: [NSLocalizedDescriptionKey: errMsg])
+                }
+
                 return Output(
-                    stdout: String(data: outReader.data, encoding: .utf8) ?? "",
-                    stderr: String(data: errReader.data, encoding: .utf8) ?? "",
+                    stdout: String(data: outData, encoding: .utf8) ?? "",
+                    stderr: String(data: errData, encoding: .utf8) ?? "",
                     terminationStatus: process.terminationStatus
                 )
             }.value
         } onCancel: {
             processBox.cancel()
         }
-    }
-
-    public static func run(_ invocation: Invocation) async throws -> Output {
-        let output = try await runCapturingExit(invocation)
-
-        if output.terminationStatus != 0 {
-            let errMsg = output.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "Script exited with code \(output.terminationStatus)"
-                : output.stderr
-            throw NSError(domain: Constants.actionErrorDomain,
-                          code: Int(output.terminationStatus),
-                          userInfo: [NSLocalizedDescriptionKey: errMsg])
-        }
-
-        return output
     }
 }

@@ -7,7 +7,7 @@
 // pre-rules URL actions keep filtering identically.
 import Foundation
 
-public struct URLTemplateAction: Action, Sendable {
+public struct URLTemplateAction: ConfigurableAction, ActionWithRules, Sendable {
     public let id: String
     public let title: String
     public let icon: ActionIcon
@@ -72,6 +72,10 @@ public struct URLTemplateAction: Action, Sendable {
         let urlString = TextPlaceholderEngine.replacePlaceholders(in: urlTemplate, context: performContext, urlEncode: true)
         
         if let url = URL(string: urlString) {
+            let sourceBundleID = context.selection.sourceApp.bundleIdentifier
+            if BrowserDetector.isBrowser(bundleIdentifier: sourceBundleID), let sourceBundleID {
+                return .openURLInApp(url: url, appBundleIdentifier: sourceBundleID)
+            }
             return .openURL(url)
         }
         

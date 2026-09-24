@@ -2,9 +2,9 @@
 
 <img src="./assets/app-icon.png" alt="OpenClip icon" align="center" width="96" height="96" />
 
-# OpenClip
+# OpenClip — The open-source macOS text utility
 
-**Instant actions for selected text on macOS.**
+**Official repository: [github.com/ganeshmshetty/openclip](https://github.com/ganeshmshetty/openclip)**
 
 [![macOS](https://img.shields.io/badge/macOS-14.0+-black?style=flat-square&logo=apple&logoColor=white)](https://support.apple.com/sonoma)
 [![Swift](https://img.shields.io/badge/Swift-6.0-orange?style=flat-square&logo=swift&logoColor=white)](https://www.swift.org)
@@ -15,11 +15,8 @@
 [![Product Hunt](https://img.shields.io/badge/Product%20Hunt-OpenClip-DA552F?style=flat-square&logo=producthunt&logoColor=white)](https://www.producthunt.com/products/openclip)
 <br />
 
-<a href="https://github.com/sponsors/ganeshmshetty" target="_blank">
-  <img src="https://img.shields.io/badge/Sponsor%20on%20GitHub-EA4AAA?style=for-the-badge&logo=github-sponsors&logoColor=white" height="32" alt="Sponsor on GitHub" />
-</a>
-<a href="https://buymeacoffee.com/ganeshmshetty" target="_blank">
-  <img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" height="32" alt="Buy Me A Coffee" />
+<a href="https://getopenclip.app/support" target="_blank">
+  <img src="https://img.shields.io/badge/Sponsor%20OpenClip-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" height="32" alt="Sponsor OpenClip" />
 </a>
 
 <br />
@@ -62,7 +59,7 @@ Select any text in any app, and OpenClip appears with contextual actions — cop
 ### Homebrew (Recommended)
 
 ```bash
-brew install --cask ganeshmshetty/tap/openclip
+brew install --cask openclip
 ```
 
 ### Direct Download
@@ -103,8 +100,7 @@ action catalog — including disabled actions — by title. Type a fragment of a
 straight to it.
 
 > [!TIP]
-> No text selected? The popup still appears and acts on the current clipboard contents — Copy/Cut
-> just drop out because there's no live selection to copy from.
+> No text selected? The popup still appears and acts on the current clipboard contents.
 
 ## Extending OpenClip
 
@@ -139,7 +135,7 @@ visibility with app/regex rules, and render rich results — status, notificatio
 or chained effects — from JSON emitted by a shell script.
 
 - **Action kinds** — `url`, `javascript` (JavaScriptCore with an `openclip.*` bridge + async/`fetch`), `applescript`, `shell`, `textsnippet`, `keypress`, `shortcut`, `service`, and `group` sub-menus.
-- **Install one-liner** — `./scripts/install_extension.sh path/to/extension.openclipext`
+- **Install one-liner** — `./Extensions/scripts/install.sh path/to/extension.openclipext`
 - **From the app** — browse and install from the built-in Extension Store in **Preferences → Extension Store**, or author URL/search/script actions in **Preferences → Actions**.
 - **Authoring guide** — the full manifest schema, options, visibility rules, and the `openclip.*` bridge: [`Extensions/AGENTS.md`](Extensions/AGENTS.md).
 
@@ -163,14 +159,16 @@ xcodegen generate
 # Run the test suite
 ./scripts/test.sh
 
-# Build a Release app + build/OpenClip.zip
+# Build a Release app + build/OpenClip.zip + build/OpenClip.dmg
 ./scripts/package_app.sh
 ```
 
 > [!NOTE]
-> The repo is split into a pure-domain **Core** framework and the **OpenClip** app target (AppKit +
-> SwiftUI), with XCTest suites for both. The `Extensions/` folder is a git submodule hosting the
-> official & community extension catalog (`openclip-extensions`).
+> Local builds are signed **ad-hoc**, so no Apple Developer account, certificate, or network
+> access is needed to build or run OpenClip from source. They carry the same hardened runtime and
+> entitlements as a release, and Gatekeeper will refuse them on any other Mac. Producing a
+> distributable build is opt-in — see
+> [Code Signing, Hardened Runtime & Notarization](docs/developer-guide/signing-and-notarization.md).
 
 ## Documentation
 
@@ -184,11 +182,17 @@ The full technical documentation lives in the [`docs/`](docs/index.md) hub:
 
 ## Community & Support
 
+- ❤️ **Sponsor OpenClip**: [Support the project](https://getopenclip.app/support) via GitHub Sponsors, Buy Me a Coffee, or Ko-fi.
 - 💬 **Discord**: [Join our Discord community](https://discord.gg/sy4MeFxf8) to share custom extensions, request features, and get support.
 - ⭐️ **AlternativeTo**: Find and support OpenClip on [AlternativeTo](https://alternativeto.net/software/openclip/about/?utm_source=badge&utm_medium=referral).
-- 🚀 **Product Hunt**: Check out our launch on [Product Hunt](https://www.producthunt.com/products/openclip).
+- 🚀 **Product Hunt**: Check out our launch on [Product Hunt](https://www.producthunt.com/products) - still in progress.
 - 🐛 **Issues & Feedback**: Report bugs or suggest ideas on [GitHub Issues](https://github.com/ganeshmshetty/openclip/issues).
 
 ## License
 
 OpenClip is released under the [MIT License](LICENSE). Copyright (c) 2026 Ganesh M and OpenClip Contributors.
+
+## Legal & Trademark Notice
+
+PopClip is a registered trademark of Nicholas Moore / Pilotmoon Software. OpenClip is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Nicholas Moore or Pilotmoon Software. All other trademarks, product names, and company names or logos cited herein are the property of their respective owners.
+

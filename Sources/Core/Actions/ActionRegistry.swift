@@ -41,31 +41,89 @@ public final class ActionRegistry: ObservableObject, Sendable {
         sortActions()
     }
     
-    private func sortActions() {
+    /// Maps each sub-action to the row that provides it (`SubActionProviding`: the AI Tools
+    /// launcher, group rows), so `sortActions` can place children with their parent. For non-group
+    /// providers (such as AI Tools), a child the user has ordered explicitly is left alone — an
+    /// `action.order` entry outranks inheritance. For `GroupAction`, members always stay attached
+    /// to their parent group. The first provider claiming a child wins, so membership stays
+    /// single-valued. One level only: a child never re-parents through another child.
+    private func subActionParents(explicitlyOrderedIDs: [String: Int]) -> [String: String] {
+        let resolver = SubActionResolver()
+        var parents: [String: String] = [:]
+        for parent in registeredActions where parent is any SubActionProviding {
+            for child in resolver.subActions(of: parent, in: registeredActions) {
+                guard child.id != parent.id, parents[child.id] == nil else { continue }
+                if !(parent is GroupAction), explicitlyOrderedIDs[child.id] != nil {
+                    continue
+                }
+                parents[child.id] = parent.id
+            }
+        }
+        return parents
+    }
+
+    public func sortActions() {
         let order = settingsStore.get(.actionOrder)
         let orderIndexMap: [String: Int] = Dictionary(
             order.enumerated().map { ($1, $0) },
             uniquingKeysWith: { first, _ in first }
         )
 
+        // A row that opens into sub-actions (the AI Tools launcher, group rows) owns where its
+        // children sit: flat surfaces — the search palette above all — list the children instead
+        // of the parent row, so a child that inherits nothing lands at the very end of the
+        // catalog no matter where the user dragged the parent. AI presets are the visible case:
+        // they carry chrome source `.ai`, which is neither user-ordered nor builtin, so "AI Tools
+        // first" in Preferences still left every AI command last in the palette.
+        let parentIDByChildID = subActionParents(explicitlyOrderedIDs: orderIndexMap)
+        let actionsByID = Dictionary(registeredActions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let extensionMemberOrder = settingsStore.get(.extensionGroupMemberOrder)
+
         // Tier classification:
         // Tier 0: Explicitly ordered by user in `action.order` (sorted by rank in orderIndexMap)
         // Tier 1: Un-ordered built-in actions (sorted stably by insertion order)
         // Tier 2: Un-ordered extensions/other actions (sorted stably by insertion order)
-        let ranked: [(action: any Action, tier: Int, rank: Int, stableOffset: Int)] = registeredActions.enumerated().map { offset, action in
+        // A child adopts its parent's whole classification and sorts immediately after it
+        // (`subRank` 1), so it follows the parent wherever the parent lands.
+        func placement(of action: any Action) -> (tier: Int, rank: Int) {
             if let index = orderIndexMap[action.id] {
-                return (action, 0, index, offset)
+                return (0, index)
             } else if ActionIdentity.isBuiltin(action) {
-                return (action, 1, 0, offset)
+                return (1, 0)
             } else {
-                return (action, 2, 0, offset)
+                return (2, 0)
             }
+        }
+
+        let offsetByID: [String: Int] = Dictionary(
+            registeredActions.enumerated().map { ($1.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let ranked: [(action: any Action, tier: Int, rank: Int, slot: Int, subRank: Int, subOrder: Int, stableOffset: Int)] = registeredActions.enumerated().map { offset, action in
+            if let parentID = parentIDByChildID[action.id],
+               let parent = actionsByID[parentID],
+               let parentSlot = offsetByID[parentID] {
+                let inherited = placement(of: parent)
+                let customSubOrder: Int
+                if let groupOrder = extensionMemberOrder[parentID],
+                   let memberIdx = groupOrder.firstIndex(of: action.id) {
+                    customSubOrder = memberIdx
+                } else {
+                    customSubOrder = Int.max
+                }
+                return (action, inherited.tier, inherited.rank, parentSlot, 1, customSubOrder, offset)
+            }
+            let own = placement(of: action)
+            return (action, own.tier, own.rank, offset, 0, 0, offset)
         }
 
         let sortedBase = ranked
             .sorted { lhs, rhs in
                 if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
                 if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
+                if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+                if lhs.subRank != rhs.subRank { return lhs.subRank < rhs.subRank }
+                if lhs.subOrder != rhs.subOrder { return lhs.subOrder < rhs.subOrder }
                 return lhs.stableOffset < rhs.stableOffset
             }
             .map(\.action)
@@ -142,12 +200,25 @@ public final class ActionRegistry: ObservableObject, Sendable {
         }
         
         newActions.insert(contentsOf: movingActions, at: dest)
-        actions = newActions
-        
-        let newOrder = actions
-            .filter { !ActionIdentity.isAIPreset($0) && !($0 is CustomGroupAction) }
+
+        let resolver = SubActionResolver()
+        let subActionIDs: Set<String> = Set(
+            registeredActions
+                .filter { $0 is any SubActionProviding }
+                .flatMap { resolver.subActions(of: $0, in: registeredActions).map(\.id) }
+        )
+
+        let newOrder = newActions
+            .filter { !ActionIdentity.isAIPreset($0) && !($0 is CustomGroupAction) && !subActionIDs.contains($0.id) }
             .map { $0.id }
         settingsStore.set(.actionOrder, value: newOrder)
+
+        // Re-derive rather than publishing the hand-moved array: a drag moves only the rows the
+        // user grabbed, so anything whose placement is *derived* — a sub-action following its
+        // parent row (AI presets under AI Tools), a group's members trailing its header — would
+        // keep the position it had before the drag until the next registration re-sorted the
+        // catalog. That is why reordering AI Tools appeared to need a restart to take effect.
+        sortActions()
     }
     
     public func unregister(actionID: String) {
@@ -156,10 +227,17 @@ public final class ActionRegistry: ObservableObject, Sendable {
         pruneActionOrder()
     }
 
+    public func replaceRegisteredActions(matching isMatch: (any Action) -> Bool, with newActions: [any Action]) {
+        registeredActions.removeAll(where: isMatch)
+        registeredActions.append(contentsOf: newActions)
+        sortActions()
+        pruneActionOrder()
+    }
+
     public func pruneActionOrder() {
         let currentOrder = settingsStore.get(.actionOrder)
         guard !currentOrder.isEmpty else { return }
-        let activeIDs = Set(registeredActions.map { $0.id })
+        let activeIDs = Set(registeredActions.map { $0.id }).union(groupDefs.map { $0.id })
         let prunedOrder = currentOrder.filter { activeIDs.contains($0) }
         if prunedOrder != currentOrder {
             settingsStore.set(.actionOrder, value: prunedOrder)
@@ -175,6 +253,13 @@ public final class ActionRegistry: ObservableObject, Sendable {
         sortActions()
     }
 
+    public func setExtensionGroupMemberOrder(groupID: String, memberIDs: [String]) {
+        var currentMap = settingsStore.get(.extensionGroupMemberOrder)
+        currentMap[groupID] = memberIDs
+        settingsStore.set(.extensionGroupMemberOrder, value: currentMap)
+        sortActions()
+    }
+
     /// Clears all registered actions. Test-isolation hook so the shared singleton does not leak
     /// state across test cases.
     public func reset() {
@@ -184,23 +269,62 @@ public final class ActionRegistry: ObservableObject, Sendable {
     }
     
     /// Context gating shared by the bar and the search palette: can this action actually perform
-    /// against the current selection/app? Settings-disable state is deliberately out of scope here
-    /// (the bar applies it separately; the palette ignores it). Clipboard-fallback actions that
-    /// require a live selection and formatting actions under a deny-formatting app policy drop.
-    /// AI presets are treated as performable (a palette selection routes to the AI card regardless
-    /// of the enable toggle; the bar excludes presets by policy, not by ability).
+    /// against the current selection/app? Settings-disable state is applied separately (see
+    /// `settingsHiddenIDs`). Clipboard-fallback actions that require a live selection and
+    /// formatting actions under a deny-formatting app policy drop. An AI preset answers through
+    /// its own `isEnabled`, which reads the preset's toggle in AI settings, so a preset switched
+    /// off there is not offered anywhere.
     private func canPerform(_ action: any Action, in context: ActionContext) -> Bool {
-        // AI presets are always performable from the palette: a selection routes to the AI
-        // card regardless of the preset's enable toggle, so they stay visible.
-        if ActionIdentity.isAIPreset(action) {
-            return true
-        }
         // Clipboard fallback is not a live selection: Copy/Cut (and any future action that
         // reads or mutates the real selection) must not act on text that was never selected.
         if context.selection.isClipboardFallback && action.chrome.requiresLiveSelection {
             return false
         }
         return action.isEnabled(for: context)
+    }
+
+    /// Whether the user has switched this action off in settings — per action, or through its
+    /// whole extension package. Shared by the bar and the palette so "disabled" means the same
+    /// thing on both surfaces.
+    private func isDisabledInSettings(_ action: any Action, disabledIDs: Set<String>, disabledPackages: Set<String>) -> Bool {
+        if disabledIDs.contains(action.id) { return true }
+        if let packageID = ActionIdentity.extensionPackageID(of: action), disabledPackages.contains(packageID) {
+            return true
+        }
+        return false
+    }
+
+    /// Group rows whose members must be hidden with them: a disabled group never leaks its
+    /// sub-actions, on either surface. `isRowVisible` decides whether a group row itself survives
+    /// (the bar also requires it to be performable in context).
+    private func hiddenGroupIDs(isRowVisible: (any Action) -> Bool) -> Set<String> {
+        Set(
+            actions
+                .filter { $0.chrome.popupBehavior == .showSubActions }
+                .filter { !isRowVisible($0) }
+                .map(\.id)
+        )
+    }
+
+    /// True when the action belongs to a group in `hiddenGroupIDs` — either by id prefix (built-in
+    /// and extension groups) or by explicit membership (custom groups keep canonical ids).
+    private func belongsToHiddenGroup(_ action: any Action, hiddenGroupIDs: Set<String>, customGroupMemberToGroupID: [String: String]) -> Bool {
+        if hiddenGroupIDs.contains(where: { action.id.hasPrefix($0 + ".") }) { return true }
+        if let owningGroupID = customGroupMemberToGroupID[action.id], hiddenGroupIDs.contains(owningGroupID) {
+            return true
+        }
+        return false
+    }
+
+    /// Custom-group membership map (member id → group id).
+    private func customGroupMembership() -> [String: String] {
+        var map: [String: String] = [:]
+        for def in groupDefs {
+            for memberID in def.memberActionIDs {
+                map[memberID] = def.id
+            }
+        }
+        return map
     }
 
     public func availableActions(for context: ActionContext) -> [any Action] {
@@ -218,69 +342,69 @@ public final class ActionRegistry: ObservableObject, Sendable {
                 return false
             }
             guard canPerform(action, in: context) else { return false }
-            if disabledIDs.contains(action.id) {
-                return false
-            }
-            // Whole-package disable: an action whose chrome source names a disabled package
-            // is hidden before per-action visibility runs.
-            if let packageID = ActionIdentity.extensionPackageID(of: action), disabledPackages.contains(packageID) {
-                return false
-            }
-            return true
+            // Per-action and whole-package disable, before per-action visibility runs.
+            return !isDisabledInSettings(action, disabledIDs: disabledIDs, disabledPackages: disabledPackages)
         }
 
         // Group sub-actions are only reachable through their group's sub-menu. A group whose
         // row is disabled (or otherwise not visible) hides its sub-actions entirely, so a
         // disabled group never leaks its sub-actions into the bar.
-        let groupRowIDs = actions
-            .filter { $0.chrome.popupBehavior == .showSubActions }
-            .map { $0.id }
-        let enabledGroupIDs = Set(
-            actions
-                .filter { $0.chrome.popupBehavior == .showSubActions }
-                .filter { passes($0) }
-                .map { $0.id }
-        )
+        let hiddenGroups = hiddenGroupIDs(isRowVisible: passes)
+        let customGroupMemberToGroupID = customGroupMembership()
 
-        // Custom groups: hide members of a disabled custom group.
-        // This parallels the prefix-based hiding above but uses the explicit
-        // memberActionIDs list since custom group members keep canonical IDs.
-        let customGroupMemberToGroupID: [String: String] = {
-            var map: [String: String] = [:]
-            for def in groupDefs {
-                for memberID in def.memberActionIDs {
-                    map[memberID] = def.id
-                }
-            }
-            return map
-        }()
-
-        return actions.filter { action in
+        let available = actions.filter { action in
             guard passes(action) else { return false }
-            if let groupID = groupRowIDs.first(where: { action.id.hasPrefix($0 + ".") }),
-               !enabledGroupIDs.contains(groupID) {
-                return false
-            }
-            if let owningGroupID = customGroupMemberToGroupID[action.id],
-               !enabledGroupIDs.contains(owningGroupID) {
-                return false
-            }
-            return true
+            return !belongsToHiddenGroup(action, hiddenGroupIDs: hiddenGroups, customGroupMemberToGroupID: customGroupMemberToGroupID)
         }
+
+        guard settingsStore.get(.contextualActionsEnabled) else {
+            return available
+        }
+
+        let disabledContextualIDs = settingsStore.get(.disabledContextualActionIDs)
+
+        var contextualMatches: [any Action] = []
+        var standardActions: [any Action] = []
+
+        for action in available {
+            if !disabledContextualIDs.contains(action.id) && action.isContextual {
+                contextualMatches.append(action)
+            } else {
+                standardActions.append(action)
+            }
+        }
+
+        return contextualMatches + standardActions
     }
 
-    /// The registered catalog for the action-search palette, filtered to actions that can
-    /// actually perform given the current context. Settings-disabled actions (`.disabledActionIDs`,
-    /// `.disabledPackages`) stay visible — the palette is a full-catalog surface and a disabled row
-    /// can be re-enabled — but actions that cannot run against this context are dropped:
+    /// The registered catalog for the action-search palette: what the user can actually run right
+    /// now. An action switched off in settings never appears — per action, through its whole
+    /// extension package, through a disabled group (whose members go with it), or, for an AI
+    /// preset, through its toggle in AI settings — so the palette offers the same set the bar
+    /// does, just flat and unpaginated. Actions that cannot run against this context drop too:
     /// `isEnabled(for:)` failures (no selection, regex/app/expression gates), clipboard-fallback
     /// actions that require a live selection, and formatting actions under a deny-formatting app
     /// policy. Sub-actions appear individually, flat; group rows remain (their sub-actions are
     /// reachable directly from the palette). `chrome.launchesAI` launchers and the inline
     /// completion pseudo-action are always excluded.
     public func searchCatalog(for context: ActionContext) -> [any Action] {
-        actions.filter { action in
+        let disabledIDs = settingsStore.get(.disabledActionIDs)
+        let disabledPackages = settingsStore.get(.disabledPackages)
+        // A group row hides its members here on settings state alone: the palette lists the
+        // members, not the row, so "the group is off" has to reach them.
+        let hiddenGroups = hiddenGroupIDs { row in
+            !isDisabledInSettings(row, disabledIDs: disabledIDs, disabledPackages: disabledPackages)
+        }
+        let customGroupMemberToGroupID = customGroupMembership()
+
+        return actions.filter { action in
             if action.chrome.launchesAI || ActionIdentity.isCompletionPseudoAction(action) || action is GatedExtensionAction {
+                return false
+            }
+            if isDisabledInSettings(action, disabledIDs: disabledIDs, disabledPackages: disabledPackages) {
+                return false
+            }
+            if belongsToHiddenGroup(action, hiddenGroupIDs: hiddenGroups, customGroupMemberToGroupID: customGroupMemberToGroupID) {
                 return false
             }
             return canPerform(action, in: context)

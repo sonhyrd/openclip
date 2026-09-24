@@ -70,15 +70,8 @@ extension View {
     }
 }
 
-struct PopupTooltipPreferenceKey: PreferenceKey {
-    static let defaultValue: CGSize = .zero
-
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-        value = nextValue()
-    }
-}
-
-/// A lightweight, native-styled tooltip overlay for the floating popup.
+/// A lightweight, native-styled tooltip bubble, rendered by TooltipPanelController in its own
+/// screen-space window (TooltipPanel) so it is never clipped by the bar panels.
 struct PopupTooltipView: View {
     let text: String
     var effectiveTheme: String = "glass"
@@ -117,56 +110,5 @@ struct PopupTooltipView: View {
             )
             .fixedSize(horizontal: true, vertical: true)
             .allowsHitTesting(false)
-    }
-}
-
-/// A container that dynamically positions the tooltip above the hovered button and aligns it to
-/// the bar's edges when near either end to prevent any clipping without altering bar padding.
-struct PopupTooltipContainer: View {
-    let text: String
-    let targetFrame: CGRect
-    let containerWidth: CGFloat
-    let effectiveTheme: String
-    let isDark: Bool
-
-    @State private var tooltipSize: CGSize = .zero
-
-    var body: some View {
-        PopupTooltipView(
-            text: text,
-            effectiveTheme: effectiveTheme,
-            isDark: isDark,
-            maxWidth: max(40, containerWidth - 32)
-        )
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(key: PopupTooltipPreferenceKey.self, value: geo.size)
-            }
-        )
-        .onPreferenceChange(PopupTooltipPreferenceKey.self) { size in
-            tooltipSize = size
-        }
-        .position(
-            x: calculatedX,
-            y: max(tooltipSize.height / 2 + 1, targetFrame.minY - tooltipSize.height / 2 - 3)
-        )
-    }
-
-    private var calculatedX: CGFloat {
-        guard tooltipSize.width > 0 else { return targetFrame.midX }
-        let halfW = tooltipSize.width / 2
-        let minAllowed = 16 + halfW
-        let maxAllowed = max(minAllowed, containerWidth - 16 - halfW)
-
-        // If the tooltip would overflow the right edge of the bar, align its trailing edge with the bar trailing edge
-        if targetFrame.midX + halfW > containerWidth - 16 {
-            return maxAllowed
-        }
-        // If the tooltip would overflow the left edge of the bar, align its leading edge with the bar leading edge
-        if targetFrame.midX - halfW < 16 {
-            return minAllowed
-        }
-        // Otherwise center directly over the target
-        return targetFrame.midX
     }
 }

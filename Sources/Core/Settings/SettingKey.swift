@@ -7,10 +7,14 @@ import Foundation
 public struct SettingKey<Value: Sendable>: Sendable {
     public let name: String
     public let defaultValue: Value
+    /// Bumped when the meaning or shape of this setting's stored value changes, so a future
+    /// migration can tell old data from new. Brand-new keys start at 1.
+    public let schemaVersion: Int
 
-    public init(_ name: String, defaultValue: Value) {
+    public init(_ name: String, defaultValue: Value, schemaVersion: Int = 1) {
         self.name = name
         self.defaultValue = defaultValue
+        self.schemaVersion = schemaVersion
     }
 }
 
@@ -42,6 +46,14 @@ public enum PopupVerticalPosition: String, Codable, CaseIterable, Sendable {
     case below
 }
 
+/// Which Sparkle update feed the app follows ("stable" | "beta"). Beta builds are pre-releases
+/// tagged with Sparkle's `beta` channel and served from a separate appcast, so opting in never
+/// affects users on the stable channel.
+public enum UpdateChannel: String, Codable, CaseIterable, Sendable {
+    case stable
+    case beta
+}
+
 public extension SettingKey where Value == [String] {
     static var actionOrder: SettingKey<[String]> { SettingKey<[String]>("action.order", defaultValue: []) }
 }
@@ -49,10 +61,15 @@ public extension SettingKey where Value == [String] {
 public extension SettingKey where Value == Set<String> {
     static var disabledActionIDs: SettingKey<Set<String>> { SettingKey<Set<String>>("disabledActionIDs", defaultValue: []) }
     static var disabledPackages: SettingKey<Set<String>> { SettingKey<Set<String>>("disabledPackages", defaultValue: []) }
+    static var disabledContextualActionIDs: SettingKey<Set<String>> { SettingKey<Set<String>>("disabledContextualActionIDs", defaultValue: []) }
 }
 
 public extension SettingKey where Value == [String: Int] {
     static var actionUsageRecency: SettingKey<[String: Int]> { SettingKey<[String: Int]>("actionUsageRecency", defaultValue: [:]) }
+}
+
+public extension SettingKey where Value == [String: [String]] {
+    static var extensionGroupMemberOrder: SettingKey<[String: [String]]> { SettingKey<[String: [String]]>("extensionGroupMemberOrder", defaultValue: [:]) }
 }
 
 public extension SettingKey where Value == [String: String] {
@@ -62,6 +79,8 @@ public extension SettingKey where Value == [String: String] {
     static var extensionTrustHashes: SettingKey<[String: String]> { SettingKey<[String: String]>("extension.trustHashes", defaultValue: [:]) }
     /// packageID -> "store" | "local"
     static var extensionSources: SettingKey<[String: String]> { SettingKey<[String: String]>("extension.sources", defaultValue: [:]) }
+    /// actionID -> lowercase exact-match search alias
+    static var actionAliases: SettingKey<[String: String]> { SettingKey<[String: String]>("action.aliases", defaultValue: [:]) }
 }
 
 public extension SettingKey where Value == Bool {
@@ -79,6 +98,7 @@ public extension SettingKey where Value == Bool {
     static var automaticallyChecksForUpdates: SettingKey<Bool> { SettingKey<Bool>("automaticallyChecksForUpdates", defaultValue: true) }
     static var automaticallyDownloadsUpdates: SettingKey<Bool> { SettingKey<Bool>("automaticallyDownloadsUpdates", defaultValue: true) }
     static var notifyOnUpdate: SettingKey<Bool> { SettingKey<Bool>("notifyOnUpdate", defaultValue: true) }
+    static var contextualActionsEnabled: SettingKey<Bool> { SettingKey<Bool>("contextualActionsEnabled", defaultValue: true) }
 }
 
 public extension SettingKey where Value == Int {
@@ -100,17 +120,16 @@ public extension SettingKey where Value == Double {
 public extension SettingKey where Value == Data? {
     static var actionCustomizations: SettingKey<Data?> { SettingKey<Data?>("action.customizations", defaultValue: nil) }
     static var actionGroups: SettingKey<Data?> { SettingKey<Data?>("action.groups", defaultValue: nil) }
+    static var customActions: SettingKey<Data?> { SettingKey<Data?>("customActions", defaultValue: nil) }
 }
 
 public extension SettingKey where Value == String {
     static var calendarProvider: SettingKey<String> { SettingKey<String>("action.calendar.provider", defaultValue: "native") }
     static var searchURL: SettingKey<String> { SettingKey<String>("action.search.url", defaultValue: "https://www.google.com/search?q={query}") }
 
-    /// The user's chosen behavior when an action returns text (General tab →
-    /// "Action Results"): "preview" | "paste" | "copy". The raw `ResultDeliveryPreference`
-    /// values; defaults preserve today's behavior (primary pastes, secondary copies).
-    static var primaryClickBehavior: SettingKey<String> { SettingKey<String>("resultDelivery.primary", defaultValue: "paste") }
-    static var secondaryClickBehavior: SettingKey<String> { SettingKey<String>("resultDelivery.secondary", defaultValue: "copy") }
+
+    /// Default directory where action file outputs are saved. Defaults to empty string (which resolves to ~/Downloads).
+    static var fileSaveLocation: SettingKey<String> { SettingKey<String>("fileSaveLocation", defaultValue: "") }
 
     /// Popup theme ("classic"/"glass") and shared appearance ("system"/"light"/"dark").
     static var popupTheme: SettingKey<String> { SettingKey<String>("popupTheme", defaultValue: "classic") }
@@ -125,6 +144,9 @@ public extension SettingKey where Value == String {
     static var lastRunVersion: SettingKey<String> { SettingKey<String>("app.lastRunVersion", defaultValue: "") }
     /// The last build number (CFBundleVersion) the app was launched on.
     static var lastRunBuild: SettingKey<String> { SettingKey<String>("app.lastRunBuild", defaultValue: "") }
+
+    /// Which update feed the app follows: `UpdateChannel.stable` (default) or `UpdateChannel.beta`.
+    static var updateChannel: SettingKey<String> { SettingKey<String>("updates.channel", defaultValue: UpdateChannel.stable.rawValue) }
 
     /// Per-action option value key. The key name matches the legacy `action.<id>.option.<optID>`
     /// convention so existing stored values migrate over with zero data changes.

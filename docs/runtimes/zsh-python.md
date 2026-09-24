@@ -25,7 +25,7 @@ Selection Context ---> Process Instance ---> Inject Environment & write stdin
  - `OPENCLIP_MATCHED`, `OPENCLIP_CAPTURE_N`, `OPENCLIP_BUNDLE_ID`, `OPENCLIP_ACTION_ID` (see the matrix below).
 3. **Pipes Setup**: Sets up `standardInput`, `standardOutput`, and `standardError` using `Pipe()`.
 4. **Standard Input Delivery**: Selected text is written to `stdin` asynchronously.
-5. **Timeout Watchdog**: A detached task terminates the process if it exceeds `Constants.scriptTimeout` (60 s), so a hanging script never leaves the popup spinning. Users can also abort running loading tasks anytime by clicking the loading toast. Any new action that spawns a subprocess must implement the same watchdog.
+5. **Timeout Watchdog**: A GCD timer terminates the process if it exceeds `Constants.scriptTimeout` (60 s). The runner signals the direct child, the process group when the child is the leader, and remaining descendants, then sends SIGKILL after a short delay if the process identifier is unchanged. Descendants come from a `proc_listchildpids` walk of the subtree, snapshotted before the child is terminated; a probe that reports no children is still read once, so a spurious zero cannot drop a descendant. Users can also abort running loading tasks anytime by clicking the loading toast. Any new action that spawns a subprocess must implement the same watchdog.
 6. **Process Exit Evaluation**: Ensures termination status is `0`. Non-zero exit status throws `NSError` containing `stderr` text.
 
 ---
@@ -75,18 +75,43 @@ Supported `type` values:
 - `"fail"` / `"failure"` / `"error"` → surfaces error toast (`message`/`reason`/`value`).
 - `"toast"` → `ActionResult.toast` (`message`, `style`: `"success"`/`"error"`/`"info"`, `keepVisible` optional, default `false`).
 - `"configure"` → `ActionResult.openConfiguration` (`reason`, `missing: [optionID]`).
+- `"file"` → `ActionResult.file(FileOutputPayload)` (renders native file preview card; fields: `path` to existing file or `data` containing base64 data safely saved to `~/.openclip/cache/outputs/`, optional `filename`, `mimeType`, and optional `action`: `"copy"`/`"save"` to bypass preview).
+- `"copyFile"` / `"copy-file"` → `ActionResult.copyFile(URL)` (copies file at `path` to pasteboard).
+- `"saveFile"` / `"save-file"` → `ActionResult.saveFile(URL)` (saves file at `path` to user's configured save location).
 
 `"showContent"` is **not** accepted — a decoded-but-unknown `type` maps to `.success`.
 
 ### Mode 2: Plain Text Output Fallback
 
-If `stdout` contains non-JSON plain text, `ScriptAction` treats the raw output as implicitly
-returned text and returns `ActionResult.text(stdoutString)` — delivered per the user's per-click
-preference (preview/paste/copy).
+If `stdout` contains non-JSON plain text:
+
+1. **File Detection**: If the action does not replace selection (`replaceSelection: false`), OpenClip checks if the trimmed output corresponds to an existing regular file path or `file://` URL on disk. If so, it returns `ActionResult.file(FileOutputPayload)` to render the native file card.
+2. **Text Fallback**: Otherwise, `ScriptAction` treats the raw output as implicitly returned text and returns `ActionResult.text(stdoutString)` — delivered per the user's per-click preference (preview/paste/copy).
 
 ---
 
 ## Practical Examples
+
+### Python Script Generating a File (`generate_chart.py`)
+
+```python
+#!/usr/bin/env python3
+import sys, json
+
+out_path = "/tmp/chart.png"
+# ... create chart file at out_path ...
+
+# Either output the path directly on stdout for auto-detection:
+# sys.stdout.write(out_path)
+
+# Or emit explicit JSON:
+print(json.dumps({
+    "type": "file",
+    "path": out_path,
+    "filename": "chart.png",
+    "mimeType": "image/png"
+}))
+```
 
 ### Python Script Example (`clean_markdown.py`)
 

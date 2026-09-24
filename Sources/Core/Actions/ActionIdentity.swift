@@ -60,4 +60,27 @@ public enum ActionIdentity {
         action.chrome.rowStyle != .actionGroup &&
         !action.id.hasPrefix("vgroup.")
     }
+
+    /// Whether a user can assign an alias and a per-action hotkey. Only leaf actions that
+    /// actually run: groups, the AI Tools launcher, and the word-completion pseudo-action
+    /// are containers or non-palette rows.
+    public static func isBindable(_ action: any Action) -> Bool {
+        !action.chrome.launchesAI &&
+        !isCompletionPseudoAction(action) &&
+        action.chrome.popupBehavior != .showSubActions &&
+        action.chrome.rowStyle != .actionGroup
+    }
+
+    /// Whether an action can be duplicated by the user.
+    /// Custom actions and installed extension actions can be duplicated.
+    /// Builtins, AI presets, AI launchers, and word completion pseudo-actions cannot.
+    public static func canDuplicate(_ action: any Action) -> Bool {
+        if isAIPreset(action) || action.chrome.launchesAI || isCompletionPseudoAction(action) {
+            return false
+        }
+        if isBuiltin(action) {
+            return false
+        }
+        return true
+    }
 }

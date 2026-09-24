@@ -22,6 +22,18 @@ public class PopupPanel: NSPanel {
     /// When true (search mode with results above the field), content-driven growth keeps the
     /// panel's bottom edge fixed and grows upward so the field never shifts.
     public var pinBottomEdgeOnResize: Bool = false
+    /// One-shot companion to `pinBottomEdgeOnResize`: when set, the pin releases itself after the
+    /// first frame change that grows the panel — the palette's entry growth from the bar. Later
+    /// content-driven changes (the palette shrinking as a query narrows the results) then keep the
+    /// top edge, where the search field is, fixed instead of sliding the field around. Cleared by
+    /// `show(for:)`, `exitSearch()` and `hide()`.
+    public var releasesBottomPinAfterGrowth: Bool = false
+    /// Height cap `setFrame` applies to every frame request. `PopupMetrics.popupMaxHeight` for the
+    /// bar; the controller raises it to the screen height while the result card or the search
+    /// palette shows, because a surface the user resized (or one restored at its remembered size)
+    /// may legitimately be taller than the shared cap. Reset by `show(for:)`, `exitSearch()`,
+    /// `exitContent()` and `hide()`.
+    public var heightCap: CGFloat = PopupMetrics.popupMaxHeight
     public enum HorizontalAnchor: Sendable {
         case none
         case center
@@ -42,6 +54,12 @@ public class PopupPanel: NSPanel {
         set { horizontalAnchor = newValue ? .center : .none }
     }
 
+    /// True for the duration of a user drag of the panel (result card header). The controller's
+    /// hover tracking stops toggling `ignoresMouseEvents` while it is set: a fast drag can take the
+    /// cursor across the transparent shadow ring, and making the panel ignore mouse events
+    /// mid-drag would strand it under the pointer.
+    public private(set) var isUserDragging = false
+
     public init() {
         super.init(
             contentRect: .zero,
@@ -50,11 +68,27 @@ public class PopupPanel: NSPanel {
             defer: false
         )
         self.level = .popUpMenu
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         self.backgroundColor = .clear
         self.isOpaque = false
         self.hasShadow = false   // SwiftUI draws its own shadow; panel shadow causes double artifacts
         self.acceptsMouseMovedEvents = true
+        self.isMovable = true    // borderless, but the result card moves the panel by its header
+    }
+
+    /// Opens a user drag of the panel (the result card's header handle). The move itself is driven
+    /// by `PopupWindowController.handleCardDrag` — AppKit's own `performDrag` is unreachable here,
+    /// since `NSHostingView` answers `hitTest` for the whole card and never lets an AppKit handle
+    /// see the `mouseDown`. The user placing the panel deliberately outranks automatic placement,
+    /// so re-centering on width changes is switched off for the rest of the session (`hide()`
+    /// resets the anchor).
+    public func prepareForUserDrag() {
+        horizontalAnchor = .none
+        isUserDragging = true
+    }
+
+    public func endUserDrag() {
+        isUserDragging = false
     }
 
     override public var canBecomeKey: Bool { allowsKey }
@@ -78,6 +112,13 @@ public class PopupPanel: NSPanel {
 
         public override func isMousePoint(_ point: NSPoint, in rect: NSRect) -> Bool {
             Self.isInsideClickableRegion(point: point, bounds: bounds)
+        }
+
+        public override func hitTest(_ point: NSPoint) -> NSView? {
+            guard Self.isInsideClickableRegion(point: point, bounds: bounds) else {
+                return nil
+            }
+            return super.hitTest(point)
         }
 
         public override func updateTrackingAreas() {
@@ -120,13 +161,13 @@ public class PopupPanel: NSPanel {
     /// first placement (zero-sized frame) pass through untouched.
     override public func setFrame(_ frameRect: NSRect, display flag: Bool) {
         var clamped = frameRect
-        let heightWasClamped = clamped.size.height > PopupMetrics.popupMaxHeight
+        let heightWasClamped = clamped.size.height > heightCap
         let activeScreenFrame = screen?.visibleFrame ?? NSScreen.main?.visibleFrame
         if let screenFrame = activeScreenFrame {
             let maxWidth = max(0, screenFrame.width - PopupMetrics.popupPadding * 2)
             clamped.size.width = min(clamped.size.width, maxWidth)
         }
-        clamped.size.height = min(clamped.size.height, PopupMetrics.popupMaxHeight)
+        clamped.size.height = min(clamped.size.height, heightCap)
 
         // If height clamping altered the requested height, adjust origin.y to preserve the requested frame's top edge (maxY)
         if clamped.height != frameRect.height, !pinBottomEdgeOnResize {
@@ -169,6 +210,10 @@ public class PopupPanel: NSPanel {
         if sizeChangedOrClamped {
             if pinBottomEdgeOnResize {
                 clamped.origin.y = frame.origin.y
+                if releasesBottomPinAfterGrowth, clamped.height > frame.height {
+                    pinBottomEdgeOnResize = false
+                    releasesBottomPinAfterGrowth = false
+                }
             } else {
                 clamped.origin.y = frame.maxY - clamped.height
             }
