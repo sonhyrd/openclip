@@ -35,7 +35,7 @@ public enum CLIPreset: String, CaseIterable, Identifiable, Sendable {
     public var defaultModels: [String] {
         switch self {
         case .claude:
-            return ["default", "sonnet", "haiku", "opus", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"]
+            return ["default", "sonnet", "haiku", "opus", "claude-opus-5-5", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"]
         case .codex:
             return ["default", "gpt-5.6-terra", "o3", "o3-mini", "o1", "gpt-4o", "gpt-4o-mini"]
         case .copilot:
@@ -235,7 +235,7 @@ public final class CLIProvider: AIProvider {
             guard resolveBinaryPath(for: "claude") != nil else {
                 throw AIError.providerUnavailable("Claude Code CLI not installed")
             }
-            return ["sonnet", "haiku", "opus", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"]
+            return ["sonnet", "haiku", "opus", "claude-opus-5-5", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"]
 
         case .codex:
             guard resolveBinaryPath(for: "codex") != nil else {

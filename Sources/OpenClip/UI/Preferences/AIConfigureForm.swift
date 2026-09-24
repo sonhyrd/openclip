@@ -407,6 +407,9 @@ public struct AIConfigureForm: View {
         if model == "default" {
             return "Default"
         }
+        if model == "claude-opus-5-5" {
+            return "Opus 5.5"
+        }
         return model
     }
 

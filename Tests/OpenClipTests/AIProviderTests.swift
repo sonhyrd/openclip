@@ -98,6 +98,7 @@ final class AIProviderTests: XCTestCase {
         XCTAssertEqual(CLIPreset.copilot.loginCommand, "gh auth login")
         XCTAssertFalse(CLIPreset.claude.authHelpText.isEmpty)
         XCTAssertTrue(CLIPreset.claude.defaultModels.contains("sonnet"))
+        XCTAssertTrue(CLIPreset.claude.defaultModels.contains("claude-opus-5-5"))
         XCTAssertTrue(CLIPreset.codex.defaultModels.contains("o3-mini"))
     }
 
