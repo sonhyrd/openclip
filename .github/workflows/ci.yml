@@ -35,8 +35,9 @@ jobs:
       # Deliberately ad-hoc. Pull requests from forks get no access to secrets, so a signing
       # certificate here would only work for branches pushed by collaborators — and a check that
       # silently does nothing on fork PRs is worse than one that runs the same way for everyone.
-      # An ad-hoc build still exercises the whole signing path: hardened runtime, the real
-      # entitlements, and the inside-out pass over Sparkle's nested helpers.
+      # An ad-hoc build still exercises the whole signing path: the real entitlements and the
+      # inside-out pass over Sparkle's nested helpers. Only the hardened runtime is left off,
+      # because under it an ad-hoc app cannot load its own frameworks.
       - name: Build App (Release, ad-hoc signed)
         run: ./scripts/package_app.sh
 
@@ -51,6 +52,12 @@ jobs:
           mkdir -p /tmp/ci-verify
           ditto -x -k build/OpenClip.zip /tmp/ci-verify
           ./scripts/verify_signing.sh /tmp/ci-verify/OpenClip.app --require any
+
+      # Signature checks read the bundle; this runs the unpacked app. An ad-hoc build carrying the
+      # hardened runtime passes every static check yet dyld refuses its own Core.framework
+      # ("different Team IDs"), which is how the 1.6.2 sync produced unlaunchable fork builds.
+      - name: Launch Guard (dyld loads every framework)
+        run: ./scripts/verify_launch.sh /tmp/ci-verify/OpenClip.app
 
       # The zip package_app.sh produces was built and then discarded. Without this
       # the only way to get a runnable OpenClip.app is a local Xcode install, which

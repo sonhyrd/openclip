@@ -13,9 +13,10 @@
 # Usage:
 #   ./scripts/sign_artifact.sh <path-to-OpenClip.app|path-to.dmg> [--identity <name>]
 #
-# With no identity configured the artifact is signed ad-hoc, with the hardened runtime and the
-# entitlements still applied, so unsigned local builds match release builds everywhere except the
-# certificate. See scripts/signing_config.sh for the configuration precedence.
+# With no identity configured the artifact is signed ad-hoc with the entitlements but WITHOUT the
+# hardened runtime: library validation under the runtime rejects an ad-hoc app loading its own
+# ad-hoc Core.framework ("different Team IDs"), so the app would not launch. See
+# scripts/signing_config.sh for the configuration precedence.
 
 set -euo pipefail
 
@@ -66,8 +67,14 @@ TEAM_ID="$(oc_team_from_identity "$IDENTITY")"
 # the notary service rejects submissions without one. The ad-hoc pseudo-identity has no
 # certificate to timestamp against, so asking for one there just fails the build.
 TIMESTAMP_FLAG="--timestamp"
+RUNTIME_FLAGS="--options runtime"
 if oc_is_adhoc "$IDENTITY"; then
     TIMESTAMP_FLAG="--timestamp=none"
+    # Library validation needs a Team ID to match; ad-hoc code has none, so the hardened
+    # runtime makes dyld refuse the app's own frameworks. Notarization, the only reason to
+    # harden, is impossible ad-hoc anyway. --force drops the runtime flag Xcode signed with;
+    # sign_one leaves RUNTIME_FLAGS unquoted so the empty value vanishes.
+    RUNTIME_FLAGS=""
     echo "==> Signing ad-hoc (no Developer ID configured; not distributable)"
 else
     echo "==> Signing with: $IDENTITY"
@@ -80,7 +87,7 @@ sign_one() {
     codesign \
         --force \
         --sign "$IDENTITY" \
-        --options runtime \
+        $RUNTIME_FLAGS \
         "$TIMESTAMP_FLAG" \
         "$@" \
         "$path"
@@ -113,7 +120,7 @@ if [ -d "$TARGET" ]; then
 
     for item in "${NESTED[@]}"; do
         echo "    signing ${item#"$APP_PATH"/}"
-        # Nested helpers get the hardened runtime but no entitlements of their own. Sparkle's
+        # Nested helpers get the same runtime flag but no entitlements of their own. Sparkle's
         # XPC services and Updater.app ship with an empty entitlement dictionary, and its
         # Autoupdate helper carries only a placeholder application-identifier that belongs to
         # Sparkle's own ad-hoc identity — carrying that into a real Developer ID signature would

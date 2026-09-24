@@ -3,6 +3,12 @@ options:
   bundleIdPrefix: com.openclip
   developmentLanguage: en
   knownRegions: [en, Base, zh-Hans, zh-Hant, fr, ja]
+settings:
+  base:
+    # Off by default: an ad-hoc build with the hardened runtime fails library validation on its
+    # own Core.framework and never launches. package_app.sh / release_update.sh pass
+    # OPENCLIP_HARDENED_RUNTIME=YES when a Developer ID identity is configured.
+    OPENCLIP_HARDENED_RUNTIME: NO
 targets:
   Core:
     type: framework
@@ -14,7 +20,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Automatic
-        ENABLE_HARDENED_RUNTIME: true
+        ENABLE_HARDENED_RUNTIME: $(OPENCLIP_HARDENED_RUNTIME)
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
   OpenClip:
@@ -57,7 +63,7 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
-        ENABLE_HARDENED_RUNTIME: true
+        ENABLE_HARDENED_RUNTIME: $(OPENCLIP_HARDENED_RUNTIME)
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_EMIT_LOC_STRINGS: YES

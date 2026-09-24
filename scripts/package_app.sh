@@ -3,9 +3,9 @@
 #
 # Builds OpenClip in Release mode and packages it into build/OpenClip.zip and build/OpenClip.dmg.
 #
-# Signing is opt-in. With nothing configured the app is signed ad-hoc — with the hardened runtime
-# and the real entitlements still applied — so a fresh clone and a fork's CI run both work without
-# an Apple Developer account. Point OPENCLIP_SIGN_IDENTITY at a Developer ID certificate to
+# Signing is opt-in. With nothing configured the app is signed ad-hoc — with the real entitlements
+# but without the hardened runtime, which would stop an ad-hoc app loading its own frameworks — so
+# a fresh clone and a fork's CI run both work without an Apple Developer account. Point OPENCLIP_SIGN_IDENTITY at a Developer ID certificate to
 # produce a distributable build, and add OPENCLIP_NOTARIZE=1 to take it all the way through
 # Apple's notary service:
 #
@@ -43,7 +43,9 @@ echo "Building OpenClip (Release)..."
 # The build is left ad-hoc signed whatever the final identity is, and scripts/sign_artifact.sh
 # re-signs the finished bundle. That keeps one signing path for contributors and releases alike,
 # and it is the only way to get Sparkle's nested helpers off the ad-hoc signature they ship with.
-xcodebuild -project OpenClip.xcodeproj -scheme OpenClip -configuration Release -destination 'generic/platform=macOS' ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build > /dev/null
+HARDENED_RUNTIME=YES
+oc_is_adhoc "$IDENTITY" && HARDENED_RUNTIME=NO
+xcodebuild -project OpenClip.xcodeproj -scheme OpenClip -configuration Release -destination 'generic/platform=macOS' ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO OPENCLIP_HARDENED_RUNTIME="$HARDENED_RUNTIME" build > /dev/null
 
 BUILT_APP="$(find ~/Library/Developer/Xcode/DerivedData/OpenClip-*/Build/Products/Release -name "OpenClip.app" | head -n 1)"
 
@@ -59,7 +61,7 @@ fi
 "$PROJECT_DIR/scripts/verify_universal.sh" "$BUILT_APP" "OpenClip.app"
 
 # How far the signature has to go depends on what was configured. An ad-hoc build still has to
-# be hardened and carry exactly the declared entitlements; a Developer ID build additionally
+# carry exactly the declared entitlements (and must not be hardened); a Developer ID build additionally
 # needs a real certificate, a secure timestamp, and one team across every nested binary.
 REQUIRE="any"
 oc_is_adhoc "$IDENTITY" || REQUIRE="developer-id"
@@ -71,6 +73,7 @@ if [ "$NOTARIZE" = "1" ]; then
 fi
 
 "$PROJECT_DIR/scripts/verify_signing.sh" "$BUILT_APP" --require "$REQUIRE"
+"$PROJECT_DIR/scripts/verify_launch.sh" "$BUILT_APP"
 
 mkdir -p "$PROJECT_DIR/build"
 OUTPUT_ZIP="$PROJECT_DIR/build/OpenClip.zip"
