@@ -690,9 +690,17 @@ final class SelectionRetrievalCoordinatorTests: XCTestCase {
     // MARK: - Rich-content enrichment
 
     func testTextOnlyWebAreaWinEnrichesFromPasteboardCapture() async {
+        // Fork patch (https://github.com/sonhyrd/openclip/issues/29): OpenSelection 0.2.4 turned
+        // `enrichRichContent` off by default (only OPENCLIP_ENABLE_RICH_CAPTURE=1 enables it), so
+        // enable it explicitly here. Drop once upstream fixes this test.
+        var configuration = SelectionConfiguration.default
+        configuration.enrichRichContent = true
         let coordinator = SelectionRetrievalCoordinator(
+            configuration: configuration,
             inspect: { Self.webAreaTarget(selectedText: "plain selection") },
-            copyCapture: { _ in TextResult(text: "rich selection", html: "<b>rich</b> selection") }
+            copyCapture: { _ in
+                SelectionResult(text: "rich selection", html: "<b>rich</b> selection", strategy: .keyboardCopy)
+            }
         )
         let policy = AppPolicyContext(retrievalMode: .axWebArea)
         let result = await coordinator.retrieve(

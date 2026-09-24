@@ -140,8 +140,12 @@ final class AIProviderTests: XCTestCase {
         let previous = manager.activeProviderRaw
         defer { manager.activeProviderRaw = previous }
 
-        manager.activeProviderType = .apple
-        XCTAssertEqual(manager.currentProvider.type, .apple)
+        // Fork patch (https://github.com/sonhyrd/openclip/issues/29): a runner without Apple
+        // Intelligence rightly downgrades `.apple` to `.local`. Drop once upstream fixes this test.
+        if AppleIntelligenceAvailability.isSupported {
+            manager.activeProviderType = .apple
+            XCTAssertEqual(manager.currentProvider.type, .apple)
+        }
 
         manager.activeProviderType = .local
         XCTAssertEqual(manager.currentProvider.type, .local)
@@ -314,6 +318,21 @@ final class AIProviderTests: XCTestCase {
         XCTAssertEqual(AIRequestSupport.extractResultText(leaked), "Fixed text.")
         XCTAssertEqual(AIRequestSupport.extractTitleText(leaked), "Fix Spelling")
         XCTAssertFalse(leaked.contains("<title><title>"))
+    }
+
+    // MARK: - CLI working directory
+
+    func testIsolatedWorkingDirectoryIsAPrivateEmptyFolderNotRoot() throws {
+        let dir = CLIProvider.isolatedWorkingDirectory()
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertNotEqual(dir.standardizedFileURL.path, "/")
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        for protected in ["Desktop", "Documents", "Downloads"] {
+            XCTAssertFalse(dir.standardizedFileURL.path.hasPrefix("\(home)/\(protected)"), "cwd is under ~/\(protected)")
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
     }
 
     // MARK: - Fork CLI provider migration

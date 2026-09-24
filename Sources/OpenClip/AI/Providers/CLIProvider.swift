@@ -301,6 +301,7 @@ public final class CLIProvider: AIProvider {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-l", "-c", "\(binaryPath) auth status"]
+            process.currentDirectoryURL = isolatedWorkingDirectory()
             process.standardOutput = pipe
             process.standardError = Pipe()
             do {
@@ -324,6 +325,7 @@ public final class CLIProvider: AIProvider {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-l", "-c", "\(binaryPath) login status"]
+            process.currentDirectoryURL = isolatedWorkingDirectory()
             process.standardOutput = pipe
             process.standardError = errPipe
             do {
@@ -345,6 +347,7 @@ public final class CLIProvider: AIProvider {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-l", "-c", "\(binaryPath) auth status"]
+            process.currentDirectoryURL = isolatedWorkingDirectory()
             process.standardOutput = pipe
             process.standardError = Pipe()
             do {
